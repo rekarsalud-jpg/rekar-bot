@@ -28,7 +28,7 @@ def verify_webhook():
         print("❌ Error de verificación del Webhook")
         return "Error de verificación", 403
 
-# Ruta para recibir mensajes
+# Ruta para recibir mensajes de WhatsApp
 @app.route("/webhook", methods=["POST"])
 def receive_message():
     data = request.get_json()
@@ -57,4 +57,5 @@ def receive_message():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
