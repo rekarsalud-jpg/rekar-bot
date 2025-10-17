@@ -1,1 +1,1 @@
-web: gunicorn bot_rekar:app
+web: python3 bot_rekar.py
