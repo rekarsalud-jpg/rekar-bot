@@ -4,7 +4,6 @@ from flask import Flask, request
 
 app = Flask(__name__)
 
-# Variables de entorno (Render las toma automáticamente)
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 
@@ -12,9 +11,7 @@ PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 def home():
     return "REKAR Bot conectado a WhatsApp ✅"
 
-# ==========================================================
-# 🔹 Verificación del Webhook (usada por Meta al conectar)
-# ==========================================================
+# Ruta de verificación del webhook
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
     VERIFY_TOKEN = "rekar_verificacion"
@@ -22,28 +19,25 @@ def verify_webhook():
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
 
+    print(f"🔎 Recibido de Meta: mode={mode}, token={token}, challenge={challenge}")
+
     if mode == "subscribe" and token == VERIFY_TOKEN:
-        print("✅ Webhook verificado correctamente con Meta.")
+        print("✅ Webhook verificado correctamente")
         return challenge, 200
     else:
-        print("❌ Error de verificación del Webhook.")
+        print("❌ Error de verificación del Webhook")
         return "Error de verificación", 403
 
-
-# ==========================================================
-# 🔹 Recepción y respuesta automática de mensajes
-# ==========================================================
+# Ruta para recibir mensajes
 @app.route("/webhook", methods=["POST"])
 def receive_message():
     data = request.get_json()
     print("📩 Mensaje recibido:", data)
 
     try:
-        # Extrae texto y número del mensaje entrante
         msg = data["entry"][0]["changes"][0]["value"]["messages"][0]["text"]["body"]
         phone = data["entry"][0]["changes"][0]["value"]["messages"][0]["from"]
 
-        # Respuesta automática
         url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
         headers = {
             "Authorization": f"Bearer {ACCESS_TOKEN}",
@@ -55,18 +49,12 @@ def receive_message():
             "type": "text",
             "text": {"body": f"Hola 👋, soy el bot REKAR. Recibí tu mensaje: {msg}"}
         }
-
-        response = requests.post(url, headers=headers, json=body)
-        print("📤 Respuesta enviada:", response.text)
-
+        requests.post(url, headers=headers, json=body)
     except Exception as e:
         print("⚠️ Error procesando el mensaje:", e)
 
     return "OK", 200
 
 
-# ==========================================================
-# 🔹 Ejecución local (Render usará Gunicorn para producción)
-# ==========================================================
 if __name__ == "__main__":
-    app.run()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
