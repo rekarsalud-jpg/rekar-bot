@@ -19,16 +19,21 @@ def verify_webhook():
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
 
-    print(f"🔎 Recibido de Meta: mode={mode}, token={token}, challenge={challenge}")
+    # 🔍 Log para ver qué recibe Meta
+    print("📩 Parámetros recibidos desde Meta:")
+    print("mode:", mode)
+    print("token:", token)
+    print("challenge:", challenge)
 
     if mode == "subscribe" and token == VERIFY_TOKEN:
-        print("✅ Webhook verificado correctamente")
+        print("✅ Webhook verificado correctamente.")
         return challenge, 200
     else:
-        print("❌ Error de verificación del Webhook")
+        print("❌ Error de verificación del Webhook.")
         return "Error de verificación", 403
 
-# Ruta para recibir mensajes de WhatsApp
+
+# Ruta para recibir mensajes
 @app.route("/webhook", methods=["POST"])
 def receive_message():
     data = request.get_json()
