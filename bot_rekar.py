@@ -1,4 +1,4 @@
-# === REKARBOT v3 (modo desarrollo Flask directo) ===
+# === REKARBOT v5 (Flask directo, sin Gunicorn) ===
 from flask import Flask, request
 import os
 import requests
@@ -13,25 +13,23 @@ PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
 # === RUTA PRINCIPAL ===
 @app.route('/')
 def index():
-    return "💬 RekarBot funcionando correctamente (modo desarrollo)", 200
+    return "💬 RekarBot funcionando correctamente (Flask directo)", 200
 
-# === VERIFICACIÓN DEL WEBHOOK (GET) ===
+# === VERIFICACIÓN DEL WEBHOOK ===
 @app.route('/webhook', methods=['GET'])
 def verify_webhook():
     mode = request.args.get('hub.mode')
     token = request.args.get('hub.verify_token')
     challenge = request.args.get('hub.challenge')
 
-    print(f"🧩 Verificación recibida: mode={mode}, token={token}, challenge={challenge}")
-
     if mode == 'subscribe' and token == VERIFY_TOKEN:
         print("✅ Webhook verificado correctamente")
         return challenge, 200
     else:
-        print("❌ Error de verificación del webhook")
+        print("❌ Error en la verificación del webhook")
         return "Error de verificación", 403
 
-# === RECEPCIÓN DE MENSAJES (POST) ===
+# === RECEPCIÓN DE MENSAJES ===
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
     data = request.get_json()
@@ -39,19 +37,21 @@ def handle_webhook():
     print(data)
 
     try:
+        # Analiza la estructura JSON que manda Meta
         entry = data.get("entry", [])[0]
         changes = entry.get("changes", [])[0]
         value = changes.get("value", {})
-        messages = value.get("messages")
+        messages = value.get("messages", [])
 
         if messages:
-            from_number = messages[0]["from"]
-            message_text = messages[0]["text"]["body"]
+            msg = messages[0]
+            from_number = msg["from"]
+            text = msg["text"]["body"]
+            print(f"📩 De: {from_number} — Mensaje: {text}")
 
-            print(f"📩 De: {from_number} — Mensaje: {message_text}")
+            # Respuesta del bot
+            reply = f"👋 Hola! Soy RekarBot. Recibí tu mensaje: '{text}'. ¿Cómo puedo ayudarte?"
 
-            # Respuesta simple del bot
-            reply = f"👋 Hola, soy RekarBot. Recibí tu mensaje: {message_text}"
             url = f"https://graph.facebook.com/v17.0/{PHONE_NUMBER_ID}/messages"
             headers = {
                 "Authorization": f"Bearer {ACCESS_TOKEN}",
@@ -65,12 +65,12 @@ def handle_webhook():
             }
 
             response = requests.post(url, headers=headers, json=body)
-            print("📤 Respuesta enviada:", response.text)
+            print("📤 Respuesta enviada:", response.status_code, response.text)
         else:
             print("⚠️ No se encontró campo 'messages' en la data recibida")
 
     except Exception as e:
-        print("❌ Error procesando webhook:", e)
+        print("⚠️ Error procesando el mensaje:", e)
 
     return "EVENT_RECEIVED", 200
 
