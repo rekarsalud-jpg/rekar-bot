@@ -1,100 +1,93 @@
-// === REKAR BOT v2 ===
-// Bot oficial de WhatsApp REKAR Salud
-// Compatible con Meta Graph API v21 + Render Hosting
+# === REKAR BOT v2 (Python / Flask) ===
+# Bot oficial de WhatsApp REKAR Salud
+# Compatible con Meta Graph API v21 + Render Hosting
 
-import express from "express";
-import bodyParser from "body-parser";
-import fetch from "node-fetch";
+from flask import Flask, request
+import os
+import requests
 
-const app = express();
-app.use(bodyParser.json());
+app = Flask(__name__)
 
-// 🧠 Variables de entorno (Render)
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+# === VARIABLES ===
+VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
+ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
+PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
 
-// ✅ Ruta de verificación del webhook
-app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
+@app.route('/')
+def index():
+    return "✅ RekarBot funcionando correctamente", 200
 
-  if (mode && token === VERIFY_TOKEN) {
-    console.log("🟢 Webhook verificado correctamente");
-    res.status(200).send(challenge);
-  } else {
-    console.log("❌ Error de verificación");
-    res.status(403).send("Error de verificación");
-  }
-});
 
-// 📩 Ruta para recibir mensajes de WhatsApp
-app.post("/webhook", async (req, res) => {
-  try {
-    const data = req.body;
+# === VERIFICACIÓN DEL WEBHOOK (GET) ===
+@app.route('/webhook', methods=['GET'])
+def verify_webhook():
+    mode = request.args.get('hub.mode')
+    token = request.args.get('hub.verify_token')
+    challenge = request.args.get('hub.challenge')
 
-    if (data.object === "whatsapp_business_account") {
-      const entry = data.entry?.[0];
-      const changes = entry?.changes?.[0];
-      const messages = changes?.value?.messages;
+    print(f"🔍 Verificación recibida: mode={mode}, token={token}, challenge={challenge}")
 
-      if (messages && messages[0]) {
-        const message = messages[0];
-        const from = message.from; // número del usuario
-        const text = message.text?.body || "";
+    if mode == 'subscribe' and token == VERIFY_TOKEN:
+        print("🟢 Webhook verificado correctamente")
+        return challenge, 200
+    else:
+        print("❌ Error de verificación")
+        return "Error de verificación", 403
 
-        console.log("📩 Mensaje recibido:", text);
 
-        // 💬 Respuesta automática personalizada
-        const reply = `
-Hola 👋, soy el asistente automático de *REKAR Salud*.
-Recibí tu mensaje: "${text}".
+# === RECEPCIÓN DE MENSAJES (POST) ===
+@app.route('/webhook', methods=['POST'])
+def receive_message():
+    try:
+        data = request.get_json()
+
+        if data.get("object") == "whatsapp_business_account":
+            entry = data["entry"][0]
+            changes = entry["changes"][0]
+            value = changes["value"]
+
+            if "messages" in value:
+                message = value["messages"][0]
+                from_number = message["from"]
+                text = message.get("text", {}).get("body", "")
+
+                print(f"📩 Mensaje recibido de {from_number}: {text}")
+
+                reply = f"""👋 Hola, soy el asistente automático de *REKAR Salud*.
+Recibí tu mensaje: "{text}".
 En breve uno de nuestros operadores se comunicará con vos.
-Horario de atención: Lunes a Sábado de 9 a 19 hs.`;
+🕘 Horario de atención: Lunes a Sábado de 9 a 19 hs."""
 
-        await sendMessage(from, reply);
-      }
+                send_message(from_number, reply)
+
+        return "EVENT_RECEIVED", 200
+
+    except Exception as e:
+        print(f"❌ Error al procesar mensaje: {e}")
+        return "Error interno", 500
+
+
+# === FUNCIÓN PARA ENVIAR MENSAJES ===
+def send_message(to, message):
+    url = f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    body = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": message}
     }
 
-    res.sendStatus(200);
-  } catch (err) {
-    console.error("❌ Error al procesar mensaje:", err);
-    res.sendStatus(500);
-  }
-});
+    response = requests.post(url, headers=headers, json=body)
+    if response.status_code == 200:
+        print(f"✅ Mensaje enviado correctamente a {to}")
+    else:
+        print(f"❌ Error al enviar mensaje: {response.text}")
 
-// 🧠 Función para enviar mensajes
-async function sendMessage(to, message) {
-  const url = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
 
-  const body = {
-    messaging_product: "whatsapp",
-    to,
-    type: "text",
-    text: { body: message },
-  };
-
-  const headers = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${ACCESS_TOKEN}`,
-  };
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error("❌ Error al enviar mensaje:", errorText);
-  } else {
-    console.log(`✅ Respuesta enviada correctamente a ${to}`);
-  }
-}
-
-// 🚀 Servidor en Render
-app.listen(10000, () => {
-  console.log("🚀 REKAR BOT corriendo en puerto 10000");
-});
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
