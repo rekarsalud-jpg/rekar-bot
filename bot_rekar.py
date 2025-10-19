@@ -40,9 +40,10 @@ def webhook():
         text = message["text"]["body"].lower()
 
         # Respuesta simple
-        send_message(phone_number, "Hola 👋 soy RekarBot, tu asistente automático. por el momento este medio estara fuera de servicio.
-        podes comunicarte via email: rekar.salud@gmail.com")
+        send_message(phone_number, """*Hola 👋 soy RekarBot*, tu asistente automático. 
+Por el momento este medio estará *fuera de servicio*.
 
+📧 Podés comunicarte por email: rekar.salud@gmail.com""")
     except Exception as e:
         print("⚠️ Error al procesar el mensaje:", e)
 
@@ -67,4 +68,5 @@ def send_message(to, message):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
 
