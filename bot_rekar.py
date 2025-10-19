@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import requests
 import os
+import json
 
 app = Flask(__name__)
 
@@ -10,7 +11,7 @@ PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 
 @app.route("/", methods=["GET"])
 def home():
-    return "✅ Rekar Bot está activo y funcionando.", 200
+    return "✅ Rekar Bot activo.", 200
 
 
 @app.route("/webhook", methods=["GET"])
@@ -23,50 +24,46 @@ def verify_webhook():
         print("✔ Webhook verificado correctamente")
         return challenge, 200
     else:
-        print("❌ Error de verificación del webhook")
-        return "Error de verificación", 403
+        print("❌ Error en verificación")
+        return "Error", 403
 
 
 @app.route("/webhook", methods=["POST"])
-def receive_message():
+def webhook():
     data = request.get_json()
-    print("📩 Datos recibidos del webhook:")
-    print(data)
+    print("📨 DATA RECIBIDA DESDE META:")
+    print(json.dumps(data, indent=2))  # 🔍 Esto mostrará toda la estructura exacta
 
     try:
-        if "entry" in data and data["entry"]:
-            entry = data["entry"][0]
-            if "changes" in entry and entry["changes"]:
-                changes = entry["changes"][0]
-                value = changes.get("value", {})
-                messages = value.get("messages", [])
-                
-                if messages:
-                    message = messages[0]
-                    phone_number = message.get("from")
-                    text = message.get("text", {}).get("body", "").strip().lower()
+        entry = data.get("entry", [])[0]
+        changes = entry.get("changes", [])[0]
+        value = changes.get("value", {})
+        messages = value.get("messages", [])
 
-                    print(f"💬 Mensaje recibido: {text} de {phone_number}")
+        if not messages:
+            print("⚠ No se encontraron mensajes en la solicitud.")
+            return jsonify({"status": "no_message"}), 200
 
-                    if "hola" in text:
-                        send_whatsapp_message(phone_number, "👋 ¡Hola! Soy Rekar Bot. ¿Cómo puedo ayudarte hoy?")
-                    elif "turno" in text:
-                        send_whatsapp_message(phone_number, "📅 Perfecto, ¿para qué día querés solicitar tu turno?")
-                    else:
-                        send_whatsapp_message(phone_number, "🤖 No entendí tu mensaje, pero pronto te responderemos.")
-                else:
-                    print("⚠ No hay mensajes nuevos en la solicitud.")
+        message = messages[0]
+        phone_number = message.get("from")
+        text = message.get("text", {}).get("body", "").strip().lower()
+
+        print(f"📲 Mensaje recibido: {text} de {phone_number}")
+
+        if "hola" in text:
+            send_message(phone_number, "👋 ¡Hola! Soy Rekar Bot, ¿cómo puedo ayudarte?")
+        elif "turno" in text:
+            send_message(phone_number, "📅 Perfecto, ¿para qué día querés solicitar tu turno?")
         else:
-            print("⚠ Estructura inesperada en el JSON recibido.")
+            send_message(phone_number, "🤖 No entendí tu mensaje, pero pronto te ayudaremos.")
 
     except Exception as e:
         print(f"❌ Error procesando mensaje: {e}")
 
-    return jsonify({"status": "EVENT_RECEIVED"}), 200
+    return jsonify({"status": "ok"}), 200
 
 
-def send_whatsapp_message(to, message):
-    """Enviar un mensaje de texto por WhatsApp"""
+def send_message(to, message):
     url = f"https://graph.facebook.com/v22.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
@@ -78,8 +75,9 @@ def send_whatsapp_message(to, message):
         "type": "text",
         "text": {"body": message}
     }
+
     response = requests.post(url, headers=headers, json=payload)
-    print(f"📤 Respuesta de Meta API: {response.status_code} - {response.text}")
+    print(f"📤 RESPUESTA META API: {response.status_code} - {response.text}")
 
 
 if __name__ == "__main__":
