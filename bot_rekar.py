@@ -1,104 +1,62 @@
 import os
 import time
-import re
-from flask import Flask, request, jsonify
 import requests
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# ====== Entorno ======
-ACCESS_TOKEN       = os.getenv("ACCESS_TOKEN")
-PHONE_NUMBER_ID    = os.getenv("PHONE_NUMBER_ID")
-VERIFY_TOKEN       = os.getenv("VERIFY_TOKEN")
-
+# === VARIABLES DE ENTORNO ===
+ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
+PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# memoria simple en RAM
-last_contact = {}         # phone -> last timestamp we greeted
-pending_name = set()      # phones esperando que nos digan el nombre
+last_contact = {}
 
-# ====== Utilidades ======
+# === FUNCIONES AUXILIARES ===
+
 def send_whatsapp_message(phone, message):
+    """Enviar mensaje a WhatsApp via Graph API."""
     url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
         "Content-Type": "application/json"
     }
-    data = {
+    payload = {
         "messaging_product": "whatsapp",
         "to": phone,
         "type": "text",
         "text": {"body": message}
     }
-    r = requests.post(url, headers=headers, json=data)
-    print("📤 WA:", r.status_code, r.text)
-    return r.status_code == 200
-
-def send_telegram_message(text):
-    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+    try:
+        r = requests.post(url, headers=headers, json=payload)
+        print(f"📤 Enviado a WhatsApp: {r.status_code} → {r.text}")
+        return r.status_code == 200
+    except Exception as e:
+        print("❌ Error enviando a WhatsApp:", e)
         return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text})
-    print("📨 TG:", r.status_code, r.text)
-    return r.status_code == 200
 
-def need_new_greeting(phone, window_sec=1800):
+def send_telegram_message(message):
+    """Enviar mensaje a tu chat de Telegram (notificación interna)."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+    try:
+        r = requests.post(url, data=data)
+        print(f"📨 Enviado a Telegram: {r.status_code}")
+    except Exception as e:
+        print("❌ Error enviando a Telegram:", e)
+
+def need_new_greeting(phone):
+    """Verifica si pasaron más de 30 min desde el último contacto."""
     now = time.time()
-    if phone not in last_contact or (now - last_contact[phone] > window_sec):
+    if phone not in last_contact or now - last_contact[phone] > 1800:
         last_contact[phone] = now
         return True
     return False
 
-# Heurística simple para detectar nombres “probables”
-NAME_BAD_WORDS = {
-    "hola","buenas","buenos","dias","tardes","noches","gracias","consulta",
-    "turno","precio","presupuesto","necesito","quiero","urgente","soy","me","llamo",
-    "que","qué","q","como","cómo","estás","estas","ok","listo"
-}
 
-NAME_REGEX = re.compile(r"^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s'.-]{0,38}$")
-
-def extract_name(text):
-    """
-    1) Si dice 'soy ...' o 'me llamo ...' => extraemos lo que sigue.
-    2) Si está pendiente de nombre y el texto parece nombre, lo aceptamos.
-    3) Si no, devolvemos None.
-    """
-    t = text.strip()
-    tl = t.lower()
-
-    # Caso “soy … / me llamo …”
-    for key in ("me llamo", "soy"):
-        if key in tl:
-            name = t[tl.find(key) + len(key):].strip(" :,-.")
-            return normalize_name(name) if is_probable_name(name) else None
-
-    # Caso “solo el nombre”
-    return normalize_name(t) if is_probable_name(t) else None
-
-def is_probable_name(s):
-    # Longitud razonable
-    if not (2 <= len(s) <= 40):
-        return False
-    # Solo letras, espacios y signos de nombre comunes
-    if not NAME_REGEX.match(s):
-        return False
-    # No contener palabras evidentes de no-nombre
-    words = {w.strip(".,;:!?¡¿") for w in s.lower().split()}
-    if words & NAME_BAD_WORDS:
-        return False
-    # Máximo 4 palabras (nombre/s y apellido/s)
-    if len([w for w in words if w]) > 4:
-        return False
-    return True
-
-def normalize_name(s):
-    # Quita espacios múltiples y capitaliza cada palabra
-    parts = [p for p in re.split(r"\s+", s.strip()) if p]
-    return " ".join(p.capitalize() for p in parts)
-
-# ====== Endpoints ======
+# === WEBHOOK META / WHATSAPP ===
 @app.route('/webhook', methods=['GET'])
 def verify_token():
     token = request.args.get("hub.verify_token")
@@ -107,75 +65,74 @@ def verify_token():
         return challenge
     return "Token inválido", 403
 
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
-    print("📥 WA in:", data)
+    print("📥 WhatsApp recibido:", data)
+
     try:
         changes = data["entry"][0]["changes"][0]["value"]
         if "messages" in changes:
-            msg   = changes["messages"][0]
+            msg = changes["messages"][0]
             phone = msg["from"]
-            text  = msg.get("text", {}).get("body", "").strip()
+            text = msg.get("text", {}).get("body", "").strip()
 
-            # ¿Debemos saludar otra vez?
             if need_new_greeting(phone):
                 saludo = (
-                    "👋 ¡Hola! Soy *RekyBot 🤖* de *REKAR*, red de enfermería y kinesiología.\n"
-                    "🕓 Horario de atención: *Lunes a Viernes de 8 a 18 hs*.\n\n"
-                    "¿Podés decirme tu *nombre*, por favor?"
+                    "¡Hola! Soy *RekyBot 🤖* de *REKAR*, red de enfermería y kinesiología.\n"
+                    "Nuestro horario de atención es de *lunes a viernes de 8 a 18 hs*.\n\n"
+                    "¿Podés decirme tu nombre, por favor?"
                 )
                 send_whatsapp_message(phone, saludo)
-                send_telegram_message(f"📞 Nuevo contacto: {phone}\nMensaje: {text}")
-                pending_name.add(phone)
-                return jsonify({"status": "ok"}), 200
+                send_telegram_message(f"📞 Nuevo contacto: {phone} → {text}")
 
-            # Si esperamos nombre, intentamos extraerlo
-            if phone in pending_name:
-                name = extract_name(text)
-                if name:
-                    send_whatsapp_message(
-                        phone,
-                        f"¡Gracias, *{name}*! Un operador humano de *REKAR* se pondrá en contacto a la brevedad.\n"
-                        "Por favor, contanos tu consulta."
-                    )
-                    send_telegram_message(f"👤 Registrado: {name} ({phone})")
-                    pending_name.discard(phone)
-                else:
-                    # No parece nombre, pedimos de nuevo pero sin cortar el flujo
-                    send_whatsapp_message(phone, "¿Podés decirme tu *nombre*? (por ejemplo: *Juan Pérez*)")
-                    send_telegram_message(f"ℹ️ {phone} envió: {text} (no parece nombre)")
-                return jsonify({"status": "ok"}), 200
+            elif any(word in text.lower() for word in ["soy", "me llamo"]) or len(text.split()) <= 3:
+                nombre = text.replace("soy", "").replace("me llamo", "").strip().title()
+                send_whatsapp_message(phone, f"Gracias {nombre}. Un operador humano de REKAR se pondrá en contacto contigo pronto.\nPor favor, dejanos tu consulta.")
+                send_telegram_message(f"👤 Registrado: {nombre} ({phone})")
 
-            # No esperábamos nombre: reenviamos a Telegram
-            send_telegram_message(f"💬 {phone}: {text}")
+            else:
+                send_telegram_message(f"💬 {phone}: {text}")
 
     except Exception as e:
-        print("❌ Error WA:", e)
+        print("❌ Error procesando mensaje:", e)
 
     return jsonify({"status": "ok"}), 200
 
-# Webhook (opcional) para enviar desde Telegram a WhatsApp con: +54911xxxx mensaje
+
+# === WEBHOOK TELEGRAM ===
 @app.route('/telegram', methods=['POST'])
 def telegram_webhook():
     data = request.get_json()
-    print("📥 TG in:", data)
+    print("📥 Telegram evento:", data)
+
     try:
-        message = data.get("message", {})
-        text = message.get("text", "")
-        if text and text.startswith("+"):
-            # formato: +54911xxxxxxxx <mensaje>
-            parts = text.split(" ", 1)
-            if len(parts) == 2:
-                phone, msg = parts
-                ok = send_whatsapp_message(phone.replace("+", ""), msg)
-                send_telegram_message(("✅" if ok else "⚠️") + f" Envío a {phone}: {'OK' if ok else 'error'}")
+        if "message" in data:
+            chat_id = data["message"]["chat"]["id"]
+            text = data["message"].get("text", "")
+
+            if text.startswith("/start"):
+                send_telegram_message("🤖 Bot Rekar conectado correctamente.")
+                return jsonify({"ok": True})
+
+            elif text.startswith("/enviar"):
+                parts = text.split(" ", 2)
+                if len(parts) == 3:
+                    _, phone, msg = parts
+                    send_whatsapp_message(phone, msg)
+                    send_telegram_message(f"✅ Mensaje enviado a WhatsApp {phone}: {msg}")
+                else:
+                    send_telegram_message("❌ Formato incorrecto. Usá /enviar <telefono> <mensaje>")
+
+            else:
+                send_telegram_message(f"Mensaje recibido: {text}")
+
     except Exception as e:
-        print("❌ Error TG:", e)
+        print("❌ Error en Telegram webhook:", e)
 
     return jsonify({"status": "ok"}), 200
 
+
 if __name__ == '__main__':
-    import sys
-    port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
