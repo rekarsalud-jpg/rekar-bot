@@ -8,19 +8,26 @@ app = Flask(__name__)
 # ==============================
 # VARIABLES DE ENTORNO
 # ==============================
-ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")           # Meta WhatsApp token
-PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")     # WhatsApp Business ID
-SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL") # Webhook canal Slack
-SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")     # Token xoxb de Slack
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")           # Token verificación Meta
+ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
+PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
+SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
 
+HEADERS_SLACK = {
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {SLACK_BOT_TOKEN}"
+}
+
+# Base temporal de clientes conocidos
+clientes_registrados = {}
 
 # ==============================
 # FUNCIONES
 # ==============================
 def enviar_whatsapp(numero, mensaje):
-    """Envía mensaje de texto a WhatsApp vía Meta API"""
+    """Envía mensaje a WhatsApp."""
     try:
         url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
         headers = {
@@ -35,24 +42,24 @@ def enviar_whatsapp(numero, mensaje):
         }
         r = requests.post(url, headers=headers, json=data)
         print(f"📤 Enviado a WhatsApp {numero}: {mensaje}")
-        print("➡️ Meta response:", r.status_code, r.text)
+        print("➡️ Meta:", r.status_code, r.text)
     except Exception as e:
         print("❌ Error enviando WhatsApp:", e)
 
 
-def enviar_a_slack(mensaje):
-    """Envía mensaje a Slack mediante Webhook"""
+def enviar_a_slack(mensaje, canal="#todo-rekar-mensajeria-wtz"):
+    """Envía texto al canal Slack con token del bot."""
     try:
-        payload = {"text": mensaje}
-        r = requests.post(SLACK_WEBHOOK_URL, json=payload)
+        data = {"channel": canal, "text": mensaje}
+        r = requests.post("https://slack.com/api/chat.postMessage", headers=HEADERS_SLACK, json=data)
         print("📤 Enviado a Slack:", mensaje)
-        print("➡️ Slack response:", r.status_code, r.text)
+        print("➡️ Slack:", r.status_code, r.text)
     except Exception as e:
         print("❌ Error enviando a Slack:", e)
 
 
 # ==============================
-# WEBHOOK META (WhatsApp)
+# WHATSAPP WEBHOOK (ENTRADA)
 # ==============================
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook_whatsapp():
@@ -62,91 +69,95 @@ def webhook_whatsapp():
         if token == VERIFY_TOKEN:
             print("✅ Verificación Meta OK")
             return challenge
-        print("❌ Token de verificación incorrecto")
-        return "Error de verificación", 403
+        return "Token inválido", 403
 
     if request.method == "POST":
         data = request.get_json()
-        print("📩 Webhook recibido desde Meta:", json.dumps(data, indent=2, ensure_ascii=False))
-
+        print("📩 WhatsApp recibido:", json.dumps(data, indent=2, ensure_ascii=False))
         try:
             entry = data["entry"][0]["changes"][0]["value"]
             if "messages" in entry:
                 msg = entry["messages"][0]
                 numero = msg["from"]
-                texto = msg.get("text", {}).get("body", "")
+                texto = msg.get("text", {}).get("body", "").strip()
                 nombre = entry.get("contacts", [{}])[0].get("profile", {}).get("name", "Desconocido")
 
-                mensaje = f"📱 *Nuevo mensaje de cliente*\n*Teléfono:* +{numero}\n*Nombre:* {nombre}\n*Mensaje:* {texto}"
-                enviar_a_slack(mensaje)
-
-                if nombre == "Desconocido":
-                    enviar_whatsapp(numero, "👋 Hola! Soy el asistente de REKAR. ¿Podrías decirme tu nombre para registrarte?")
+                # Si es un nuevo cliente
+                if numero not in clientes_registrados:
+                    clientes_registrados[numero] = {"nombre": nombre, "registrado": False}
+                    enviar_whatsapp(numero, "👋 Hola! Soy el asistente de REKAR. ¿Podrías decirme tu nombre completo para registrarte?")
+                    enviar_a_slack(f"🆕 Nuevo contacto detectado: +{numero} (esperando nombre)")
+                else:
+                    # Si el cliente responde con su nombre
+                    if not clientes_registrados[numero]["registrado"]:
+                        clientes_registrados[numero]["nombre"] = texto
+                        clientes_registrados[numero]["registrado"] = True
+                        enviar_a_slack(f"📱 *Nuevo cliente registrado:* {texto} (+{numero})")
+                        enviar_whatsapp(numero, f"Gracias {texto}! 😊 Un profesional de REKAR se comunicará con vos pronto.")
+                    else:
+                        # Cliente ya registrado → enviar mensaje normal a Slack
+                        nombre = clientes_registrados[numero]['nombre']
+                        mensaje = f"📱 *Nuevo mensaje de cliente*\n*Teléfono:* +{numero}\n*Nombre:* {nombre}\n*Mensaje:* {texto}"
+                        enviar_a_slack(mensaje)
         except Exception as e:
-            print("⚠️ Error procesando mensaje de Meta:", e)
+            print("⚠️ Error procesando WhatsApp:", e)
 
         return "EVENT_RECEIVED", 200
 
 
 # ==============================
-# EVENTOS DE SLACK
+# SLACK EVENTS (RESPUESTA)
 # ==============================
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
     try:
-        data = request.get_json()
-        print("📥 Evento recibido de Slack:", json.dumps(data, indent=2, ensure_ascii=False))
+        data = request.get_json(force=True)
+        print("📥 Evento Slack:", json.dumps(data, indent=2, ensure_ascii=False))
 
-        # Validar challenge (verificación inicial)
         if "challenge" in data:
-            print("✅ Challenge Slack verificado")
             return jsonify({"challenge": data["challenge"]})
 
         event = data.get("event", {})
         if not event:
-            print("⚠️ Sin evento en payload Slack")
-            return "OK", 200
+            return "NO_EVENT", 200
 
-        subtype = event.get("subtype")
         user = event.get("user")
+        subtype = event.get("subtype", "")
         text = event.get("text", "").strip()
 
-        # Ignorar mensajes del propio bot
-        if subtype == "bot_message" or user is None:
-            print("⚙️ Ignorado mensaje del bot")
-            return "OK", 200
+        if subtype == "bot_message" or not text or not user:
+            return "IGNORE", 200
 
-        # Si comienza con +549 se envía a WhatsApp
         if text.startswith("+549"):
             partes = text.split(" ", 1)
             if len(partes) == 2:
                 numero, mensaje = partes
                 enviar_whatsapp(numero, mensaje)
+                enviar_a_slack(f"✅ Enviado a WhatsApp {numero}")
             else:
-                enviar_a_slack("⚠️ Formato inválido. Usa: +549XXXXXXXX mensaje")
-
+                enviar_a_slack("⚠️ Formato incorrecto. Usá: +549XXXXXXXX mensaje")
         else:
-            # Mensaje sin número → pedir número
-            enviar_a_slack("Por favor, escribí tu número de WhatsApp con el formato +549XXXXXXXX 🙌")
+            enviar_a_slack("Para responder a un cliente escribí: +549XXXXXXXX mensaje 🙌")
 
     except Exception as e:
-        print("❌ Error general procesando evento Slack:", e)
+        print("❌ Error general Slack:", e)
+        return jsonify({"error": str(e)}), 500
 
     return "OK", 200
 
 
 # ==============================
-# HANDLER GENERAL DE ERRORES
+# ERRORES GLOBALES
 # ==============================
 @app.errorhandler(Exception)
 def handle_exception(e):
-    print("🚨 Error interno Flask:", e)
+    print("🚨 Error Flask:", e)
     return jsonify({"error": str(e)}), 500
 
 
 # ==============================
-# INICIO DEL SERVIDOR
+# EJECUCIÓN
 # ==============================
 if __name__ == "__main__":
-    print("🚀 Iniciando servidor Flask en puerto", PORT)
+    print("🚀 Iniciando REKAR-BOT con registro de nombre.")
     app.run(host="0.0.0.0", port=PORT)
