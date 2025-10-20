@@ -94,12 +94,13 @@ def webhook():
             if need_new_greeting(phone):
                 saludo = ("¡Hola! Soy *RekyBot 🤖* de *REKAR*, red de enfermería y kinesiología.\n"
                           "Nuestro horario de atención es de *lunes a viernes de 8 a 18 hs*.\n\n"
-                          "¿Podés decirme tu nombre, por favor?")
+                          "¿Podés decirme tu nombre, por favor?\n"
+                          "dejanos tu pregunta👇")
                 send_whatsapp_message(phone, saludo)
                 send_slack_message(f"📞 Nuevo contacto: {phone}")
                 send_email("Nuevo contacto REKAR", f"Teléfono: {phone}\nMensaje: {text}")
             elif "soy" in text or "me llamo" in text:
-                nombre = text.replace("soy", "").replace("me llamo", "").strip()
+                nombre = text.replace("soy", "").replace("me llamo", "").replace("","").strip()
                 send_whatsapp_message(phone, f"Gracias {nombre}. Un operador humano de REKAR se pondrá en contacto contigo pronto.\nPor favor, dejanos tu consulta.")
                 send_slack_message(f"👤 {nombre} ({phone}) se registró y espera atención.")
                 send_email("Cliente identificado", f"Nombre: {nombre}\nTeléfono: {phone}")
@@ -136,3 +137,4 @@ def slack_events():
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+
