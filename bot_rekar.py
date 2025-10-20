@@ -1,24 +1,26 @@
 from flask import Flask, request, jsonify
 import requests
 import os
+import json
 
 app = Flask(__name__)
 
 # ==============================
 # VARIABLES DE ENTORNO
 # ==============================
-ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")  # Token de Meta WhatsApp Cloud API
-PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")  # ID de número de WhatsApp
-SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")  # Webhook de Slack
-SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")  # Token del bot Slack
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")  # Token de verificación Meta
+ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")           # Meta WhatsApp token
+PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")     # WhatsApp Business ID
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL") # Webhook canal Slack
+SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")     # Token xoxb de Slack
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")           # Token verificación Meta
+PORT = int(os.getenv("PORT", 10000))
+
 
 # ==============================
-# FUNCIONES DE UTILIDAD
+# FUNCIONES
 # ==============================
-
 def enviar_whatsapp(numero, mensaje):
-    """Envía un mensaje de WhatsApp usando la API de Meta."""
+    """Envía mensaje de texto a WhatsApp vía Meta API"""
     try:
         url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
         headers = {
@@ -32,113 +34,119 @@ def enviar_whatsapp(numero, mensaje):
             "text": {"body": mensaje}
         }
         r = requests.post(url, headers=headers, json=data)
-        print(f"📤 Enviando a WhatsApp {numero}: {mensaje}")
-        print("➡️ Respuesta Meta:", r.status_code, r.text)
+        print(f"📤 Enviado a WhatsApp {numero}: {mensaje}")
+        print("➡️ Meta response:", r.status_code, r.text)
     except Exception as e:
-        print("⚠️ Error al enviar mensaje de WhatsApp:", e)
+        print("❌ Error enviando WhatsApp:", e)
 
 
-def enviar_a_slack(texto):
-    """Envía mensaje a Slack vía Webhook."""
+def enviar_a_slack(mensaje):
+    """Envía mensaje a Slack mediante Webhook"""
     try:
-        requests.post(SLACK_WEBHOOK_URL, json={"text": texto})
-        print("📤 Enviado a Slack:", texto)
+        payload = {"text": mensaje}
+        r = requests.post(SLACK_WEBHOOK_URL, json=payload)
+        print("📤 Enviado a Slack:", mensaje)
+        print("➡️ Slack response:", r.status_code, r.text)
     except Exception as e:
-        print("⚠️ Error al enviar a Slack:", e)
+        print("❌ Error enviando a Slack:", e)
 
 
 # ==============================
-# ENDPOINT WEBHOOK META (WHATSAPP)
+# WEBHOOK META (WhatsApp)
 # ==============================
-
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook_whatsapp():
-    """Recibe mensajes de WhatsApp y los reenvía a Slack."""
     if request.method == "GET":
-        # Verificación inicial de Meta
-        if request.args.get("hub.verify_token") == VERIFY_TOKEN:
-            return request.args.get("hub.challenge")
-        return "Token de verificación incorrecto", 403
+        token = request.args.get("hub.verify_token")
+        challenge = request.args.get("hub.challenge")
+        if token == VERIFY_TOKEN:
+            print("✅ Verificación Meta OK")
+            return challenge
+        print("❌ Token de verificación incorrecto")
+        return "Error de verificación", 403
 
-    elif request.method == "POST":
+    if request.method == "POST":
         data = request.get_json()
-        print("📩 Mensaje recibido de WhatsApp:", data)
+        print("📩 Webhook recibido desde Meta:", json.dumps(data, indent=2, ensure_ascii=False))
 
         try:
             entry = data["entry"][0]["changes"][0]["value"]
-
-            # Si hay mensajes
             if "messages" in entry:
-                mensaje = entry["messages"][0]
-                numero = mensaje["from"]
-                texto = mensaje.get("text", {}).get("body", "")
-
-                # Buscar nombre si viene en contacto
+                msg = entry["messages"][0]
+                numero = msg["from"]
+                texto = msg.get("text", {}).get("body", "")
                 nombre = entry.get("contacts", [{}])[0].get("profile", {}).get("name", "Desconocido")
 
-                texto_slack = f"📱 *Nuevo mensaje de cliente*\n*Teléfono:* +{numero}\n*Nombre:* {nombre}\n*Mensaje:* {texto}"
-                enviar_a_slack(texto_slack)
+                mensaje = f"📱 *Nuevo mensaje de cliente*\n*Teléfono:* +{numero}\n*Nombre:* {nombre}\n*Mensaje:* {texto}"
+                enviar_a_slack(mensaje)
 
-                # Responder automáticamente pidiendo nombre si no se conoce
                 if nombre == "Desconocido":
                     enviar_whatsapp(numero, "👋 Hola! Soy el asistente de REKAR. ¿Podrías decirme tu nombre para registrarte?")
         except Exception as e:
-            print("⚠️ Error procesando mensaje de WhatsApp:", e)
+            print("⚠️ Error procesando mensaje de Meta:", e)
 
         return "EVENT_RECEIVED", 200
 
 
 # ==============================
-# ENDPOINT EVENTOS SLACK
+# EVENTOS DE SLACK
 # ==============================
-
-@app.route('/slack/events', methods=['POST'])
+@app.route("/slack/events", methods=["POST"])
 def slack_events():
-    """Recibe eventos de Slack (mensajes en canal) y los reenvía a WhatsApp."""
-    data = request.get_json()
-    print("📥 Evento recibido desde Slack:", data)
-
-    # ✅ Validar challenge de verificación
-    if "challenge" in data:
-        return jsonify({"challenge": data["challenge"]})
-
     try:
+        data = request.get_json()
+        print("📥 Evento recibido de Slack:", json.dumps(data, indent=2, ensure_ascii=False))
+
+        # Validar challenge (verificación inicial)
+        if "challenge" in data:
+            print("✅ Challenge Slack verificado")
+            return jsonify({"challenge": data["challenge"]})
+
         event = data.get("event", {})
-        subtype = event.get("subtype", "")
+        if not event:
+            print("⚠️ Sin evento en payload Slack")
+            return "OK", 200
+
+        subtype = event.get("subtype")
         user = event.get("user")
         text = event.get("text", "").strip()
 
-        # Evitar responder a mensajes del propio bot
+        # Ignorar mensajes del propio bot
         if subtype == "bot_message" or user is None:
+            print("⚙️ Ignorado mensaje del bot")
             return "OK", 200
 
-        # Si empieza con +549 se interpreta como número + mensaje
+        # Si comienza con +549 se envía a WhatsApp
         if text.startswith("+549"):
             partes = text.split(" ", 1)
             if len(partes) == 2:
                 numero, mensaje = partes
                 enviar_whatsapp(numero, mensaje)
-                print(f"✅ Enviado a WhatsApp {numero}: {mensaje}")
             else:
-                enviar_a_slack("⚠️ Formato incorrecto. Usá: +549XXXXXXXX mensaje")
+                enviar_a_slack("⚠️ Formato inválido. Usa: +549XXXXXXXX mensaje")
 
-        # Si no empieza con número, el bot pide nombre
         else:
-            slack_response = {
-                "text": "Por favor, escribí tu número de WhatsApp (con +549...) y tu nombre para registrarte 🙌"
-            }
-            requests.post(SLACK_WEBHOOK_URL, json=slack_response)
-            print("ℹ️ Solicitud de nombre enviada a Slack")
+            # Mensaje sin número → pedir número
+            enviar_a_slack("Por favor, escribí tu número de WhatsApp con el formato +549XXXXXXXX 🙌")
 
     except Exception as e:
-        print("⚠️ Error procesando evento Slack:", e)
+        print("❌ Error general procesando evento Slack:", e)
 
     return "OK", 200
 
 
 # ==============================
-# INICIO DEL SERVICIO
+# HANDLER GENERAL DE ERRORES
 # ==============================
+@app.errorhandler(Exception)
+def handle_exception(e):
+    print("🚨 Error interno Flask:", e)
+    return jsonify({"error": str(e)}), 500
 
+
+# ==============================
+# INICIO DEL SERVIDOR
+# ==============================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    print("🚀 Iniciando servidor Flask en puerto", PORT)
+    app.run(host="0.0.0.0", port=PORT)
