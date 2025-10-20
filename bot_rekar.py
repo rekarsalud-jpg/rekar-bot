@@ -1,27 +1,24 @@
 import os
 import time
-from datetime import datetime
+import re
 from flask import Flask, request, jsonify
 import requests
-import smtplib
-from email.mime.text import MIMEText
 
 app = Flask(__name__)
 
-ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
-PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
-SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
-SLACK_CHANNEL = os.getenv("SLACK_CHANNEL", "#todo-rekar-mensajeria-wtz")
+# ====== Entorno ======
+ACCESS_TOKEN       = os.getenv("ACCESS_TOKEN")
+PHONE_NUMBER_ID    = os.getenv("PHONE_NUMBER_ID")
+VERIFY_TOKEN       = os.getenv("VERIFY_TOKEN")
 
-EMAIL_DESTINATION = os.getenv("EMAIL_DESTINATION")
-EMAIL_SENDER = os.getenv("EMAIL_SENDER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 
-last_contact = {}
+# memoria simple en RAM
+last_contact = {}         # phone -> last timestamp we greeted
+pending_name = set()      # phones esperando que nos digan el nombre
 
+# ====== Utilidades ======
 def send_whatsapp_message(phone, message):
     url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
     headers = {
@@ -34,43 +31,74 @@ def send_whatsapp_message(phone, message):
         "type": "text",
         "text": {"body": message}
     }
-    response = requests.post(url, headers=headers, json=data)
-    print("📤 Enviado a WhatsApp:", response.status_code, response.text)
-    return response.status_code == 200
-
-def send_slack_message(text):
-    url = "https://slack.com/api/chat.postMessage"
-    headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}"}
-    data = {"channel": SLACK_CHANNEL, "text": text}
     r = requests.post(url, headers=headers, json=data)
-    print("📩 Enviado a Slack:", r.status_code, r.text)
+    print("📤 WA:", r.status_code, r.text)
     return r.status_code == 200
 
-def send_email(subject, body):
-    if not EMAIL_DESTINATION: return
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = EMAIL_SENDER
-    msg["To"] = EMAIL_DESTINATION
-    try:
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-            server.send_message(msg)
-        print("📧 Email enviado correctamente")
-    except Exception as e:
-        print("❌ Error al enviar email:", e)
+def send_telegram_message(text):
+    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text})
+    print("📨 TG:", r.status_code, r.text)
+    return r.status_code == 200
 
-def need_new_greeting(phone):
+def need_new_greeting(phone, window_sec=1800):
     now = time.time()
-    if phone not in last_contact:
-        last_contact[phone] = now
-        return True
-    if now - last_contact[phone] > 1800:  # 30 min
+    if phone not in last_contact or (now - last_contact[phone] > window_sec):
         last_contact[phone] = now
         return True
     return False
 
+# Heurística simple para detectar nombres “probables”
+NAME_BAD_WORDS = {
+    "hola","buenas","buenos","dias","tardes","noches","gracias","consulta",
+    "turno","precio","presupuesto","necesito","quiero","urgente","soy","me","llamo",
+    "que","qué","q","como","cómo","estás","estas","ok","listo"
+}
+
+NAME_REGEX = re.compile(r"^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s'.-]{0,38}$")
+
+def extract_name(text):
+    """
+    1) Si dice 'soy ...' o 'me llamo ...' => extraemos lo que sigue.
+    2) Si está pendiente de nombre y el texto parece nombre, lo aceptamos.
+    3) Si no, devolvemos None.
+    """
+    t = text.strip()
+    tl = t.lower()
+
+    # Caso “soy … / me llamo …”
+    for key in ("me llamo", "soy"):
+        if key in tl:
+            name = t[tl.find(key) + len(key):].strip(" :,-.")
+            return normalize_name(name) if is_probable_name(name) else None
+
+    # Caso “solo el nombre”
+    return normalize_name(t) if is_probable_name(t) else None
+
+def is_probable_name(s):
+    # Longitud razonable
+    if not (2 <= len(s) <= 40):
+        return False
+    # Solo letras, espacios y signos de nombre comunes
+    if not NAME_REGEX.match(s):
+        return False
+    # No contener palabras evidentes de no-nombre
+    words = {w.strip(".,;:!?¡¿") for w in s.lower().split()}
+    if words & NAME_BAD_WORDS:
+        return False
+    # Máximo 4 palabras (nombre/s y apellido/s)
+    if len([w for w in words if w]) > 4:
+        return False
+    return True
+
+def normalize_name(s):
+    # Quita espacios múltiples y capitaliza cada palabra
+    parts = [p for p in re.split(r"\s+", s.strip()) if p]
+    return " ".join(p.capitalize() for p in parts)
+
+# ====== Endpoints ======
 @app.route('/webhook', methods=['GET'])
 def verify_token():
     token = request.args.get("hub.verify_token")
@@ -82,59 +110,72 @@ def verify_token():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
-    print("📥 Mensaje recibido:", data)
-
+    print("📥 WA in:", data)
     try:
         changes = data["entry"][0]["changes"][0]["value"]
         if "messages" in changes:
-            msg = changes["messages"][0]
+            msg   = changes["messages"][0]
             phone = msg["from"]
-            text = msg["text"]["body"].strip().lower()
+            text  = msg.get("text", {}).get("body", "").strip()
 
+            # ¿Debemos saludar otra vez?
             if need_new_greeting(phone):
-                saludo = ("¡Hola! Soy *RekyBot 🤖* de *REKAR*, red de enfermería y kinesiología.\n"
-                          "Nuestro horario de atención es de *lunes a viernes de 8 a 18 hs*.\n\n"
-                          "¿Podés decirme tu nombre, por favor?\n"
-                          "dejanos tu pregunta👇")
+                saludo = (
+                    "👋 ¡Hola! Soy *RekyBot 🤖* de *REKAR*, red de enfermería y kinesiología.\n"
+                    "🕓 Horario de atención: *Lunes a Viernes de 8 a 18 hs*.\n\n"
+                    "¿Podés decirme tu *nombre*, por favor?"
+                )
                 send_whatsapp_message(phone, saludo)
-                send_slack_message(f"📞 Nuevo contacto: {phone}")
-                send_email("Nuevo contacto REKAR", f"Teléfono: {phone}\nMensaje: {text}")
-            elif "soy" in text or "me llamo" in text:
-                nombre = text.replace("soy", "").replace("me llamo", "").replace("","").strip()
-                send_whatsapp_message(phone, f"Gracias {nombre}. Un operador humano de REKAR se pondrá en contacto contigo pronto.\nPor favor, dejanos tu consulta.")
-                send_slack_message(f"👤 {nombre} ({phone}) se registró y espera atención.")
-                send_email("Cliente identificado", f"Nombre: {nombre}\nTeléfono: {phone}")
-            else:
-                send_slack_message(f"📨 {phone}: {text}")
+                send_telegram_message(f"📞 Nuevo contacto: {phone}\nMensaje: {text}")
+                pending_name.add(phone)
+                return jsonify({"status": "ok"}), 200
+
+            # Si esperamos nombre, intentamos extraerlo
+            if phone in pending_name:
+                name = extract_name(text)
+                if name:
+                    send_whatsapp_message(
+                        phone,
+                        f"¡Gracias, *{name}*! Un operador humano de *REKAR* se pondrá en contacto a la brevedad.\n"
+                        "Por favor, contanos tu consulta."
+                    )
+                    send_telegram_message(f"👤 Registrado: {name} ({phone})")
+                    pending_name.discard(phone)
+                else:
+                    # No parece nombre, pedimos de nuevo pero sin cortar el flujo
+                    send_whatsapp_message(phone, "¿Podés decirme tu *nombre*? (por ejemplo: *Juan Pérez*)")
+                    send_telegram_message(f"ℹ️ {phone} envió: {text} (no parece nombre)")
+                return jsonify({"status": "ok"}), 200
+
+            # No esperábamos nombre: reenviamos a Telegram
+            send_telegram_message(f"💬 {phone}: {text}")
 
     except Exception as e:
-        print("❌ Error procesando mensaje:", e)
+        print("❌ Error WA:", e)
 
     return jsonify({"status": "ok"}), 200
 
-@app.route('/slack/events', methods=['POST'])
-def slack_events():
+# Webhook (opcional) para enviar desde Telegram a WhatsApp con: +54911xxxx mensaje
+@app.route('/telegram', methods=['POST'])
+def telegram_webhook():
     data = request.get_json()
-    print("📥 Slack evento:", data)
-
-    if "challenge" in data:
-        return jsonify({"challenge": data["challenge"]})
-
+    print("📥 TG in:", data)
     try:
-        event = data.get("event", {})
-        if event.get("type") == "message" and not event.get("bot_id"):
-            text = event.get("text", "")
-            if text.startswith("+549"):
-                parts = text.split(" ", 1)
-                if len(parts) == 2:
-                    phone, msg = parts
-                    send_whatsapp_message(phone.replace("+", ""), msg)
-                    send_slack_message(f"✅ Mensaje enviado a {phone}")
+        message = data.get("message", {})
+        text = message.get("text", "")
+        if text and text.startswith("+"):
+            # formato: +54911xxxxxxxx <mensaje>
+            parts = text.split(" ", 1)
+            if len(parts) == 2:
+                phone, msg = parts
+                ok = send_whatsapp_message(phone.replace("+", ""), msg)
+                send_telegram_message(("✅" if ok else "⚠️") + f" Envío a {phone}: {'OK' if ok else 'error'}")
     except Exception as e:
-        print("❌ Error evento Slack:", e)
+        print("❌ Error TG:", e)
 
     return jsonify({"status": "ok"}), 200
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
-
+    import sys
+    port = int(os.getenv("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
