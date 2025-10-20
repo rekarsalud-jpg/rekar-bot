@@ -4,50 +4,76 @@ import os
 
 app = Flask(__name__)
 
-# Variables de entorno
+# 🔹 Variables de entorno
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "rekar_verificacion")
 ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 
+# 🔹 Usuarios ya saludados
+usuarios_saludados = set()
+
+@app.route('/')
+def home():
+    return "✅ RekarBot activo y escuchando correctamente", 200
+
+
+# =========================
+# 🔸 VERIFICACIÓN META
+# =========================
 @app.route('/webhook', methods=['GET'])
-def verify():
-    """Verifica conexión del webhook con Meta."""
+def verify_webhook():
     mode = request.args.get('hub.mode')
     token = request.args.get('hub.verify_token')
     challenge = request.args.get('hub.challenge')
+
     if mode == 'subscribe' and token == VERIFY_TOKEN:
+        print("✅ Webhook verificado correctamente.")
         return challenge, 200
-    return 'Error de verificación', 403
+    else:
+        print("❌ Error de verificación del webhook.")
+        return "Token inválido", 403
 
 
+# =========================
+# 🔸 RECEPCIÓN DE MENSAJES
+# =========================
 @app.route('/webhook', methods=['POST'])
-def webhook():
-    """Recibe mensajes desde WhatsApp."""
+def recibir_mensaje():
     data = request.get_json()
+    print("📩 Mensaje recibido:", data)
 
-    if not data or 'entry' not in data:
-        return 'no data', 400
+    try:
+        message = data["entry"][0]["changes"][0]["value"]["messages"][0]
+        phone_number = message["from"]
+        text = message["text"]["body"].strip()
 
-    for entry in data['entry']:
-        for change in entry.get('changes', []):
-            value = change.get('value', {})
-            messages = value.get('messages', [])
-            if messages:
-                for message in messages:
-                    sender = message['from']
-                    text = message['text']['body']
+        # Si es un nuevo usuario, enviar bienvenida y notificar Slack
+        if phone_number not in usuarios_saludados:
+            usuarios_saludados.add(phone_number)
+            bienvenida = (
+                "👋 ¡Bienvenido/a a *REKAR Salud*!\n\n"
+                "Somos un equipo profesional especializado en *Kinesiología y Enfermería Domiciliaria*.\n"
+                "📧 Podés escribirnos a *rekar.salud@gmail.com*\n"
+                "🕐 Horarios de atención: *Lunes a Viernes de 9 a 18 hs.*\n\n"
+                "Aguarde un momento, un representante se comunicará con usted. 🙏"
+            )
+            enviar_mensaje_whatsapp(phone_number, bienvenida)
+            notificar_slack(phone_number, text)
+        else:
+            # Si ya fue saludado, solo notificamos a Slack
+            notificar_slack(phone_number, text)
 
-                    # Solo responder si es el primer mensaje
-                    if not message.get("context"):
-                        enviar_mensaje_whatsapp(sender)
-                        notificar_slack(sender, text)
+    except Exception as e:
+        print(f"⚠️ Error al procesar mensaje: {e}")
 
-    return 'ok', 200
+    return "ok", 200
 
 
-def enviar_mensaje_whatsapp(to):
-    """Envía mensaje de bienvenida al cliente."""
+# =========================
+# 🔸 ENVÍO DE MENSAJES A WHATSAPP
+# =========================
+def enviar_mensaje_whatsapp(to, message):
     url = f"https://graph.facebook.com/v17.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
@@ -57,24 +83,44 @@ def enviar_mensaje_whatsapp(to):
         "messaging_product": "whatsapp",
         "to": to,
         "type": "text",
-        "text": {
-            "body": (
-                "👋 ¡Hola! Gracias por comunicarte con *Rekar Asistencia Profesional*.\n\n"
-                "🕒 Horarios de atención: Lunes a Viernes de 8 a 18 hs.\n"
-                "📧 Contacto: rekar.salud@gmail.com\n\n"
-                "🧑‍⚕️ En unos minutos un representante se comunicará con vos."
-            )
-        }
+        "text": {"body": message}
     }
-    requests.post(url, headers=headers, json=data)
+
+    response = requests.post(url, headers=headers, json=data)
+    print(f"📤 Enviado a {to}: {response.text}")
 
 
+# =========================
+# 🔸 AVISO A SLACK
+# =========================
 def notificar_slack(phone, mensaje):
-    """Envía aviso a Slack cuando un cliente escribe."""
-    texto = f"📩 *Nuevo cliente escribió desde WhatsApp*\n📱 *Teléfono:* {phone}\n💬 *Mensaje:* {mensaje}"
-    requests.post(SLACK_WEBHOOK_URL, json={"text": texto})
+    texto = f"📞 *Nuevo mensaje de cliente:*\nTeléfono: `{phone}`\nMensaje: {mensaje}"
+    try:
+        requests.post(SLACK_WEBHOOK_URL, json={"text": texto})
+        print("✅ Notificación enviada a Slack.")
+    except Exception as e:
+        print(f"⚠️ Error al notificar a Slack: {e}")
 
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0',
-    port=int(os.environ.get("port",10000)))
+# =========================
+# 🔸 RESPUESTA DESDE SLACK
+# =========================
+@app.route("/slack", methods=["POST"])
+def responder_desde_slack():
+    data = request.form
+    texto = data.get("text", "")
+    partes = texto.split(" ", 1)
+
+    if len(partes) < 2:
+        return "⚠️ Formato inválido. Usa: /responder <numero> <mensaje>", 200
+
+    numero, mensaje = partes
+    enviar_mensaje_whatsapp(numero, mensaje)
+    return f"✅ Mensaje enviado a {numero}", 200
+
+
+# =========================
+# 🔸 MAIN
+# =========================
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
