@@ -1,152 +1,138 @@
+import os
+import time
+from datetime import datetime
 from flask import Flask, request, jsonify
-import requests, os, json, time
+import requests
+import smtplib
+from email.mime.text import MIMEText
 
 app = Flask(__name__)
 
-# ======= VARIABLES DE ENTORNO =======
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "rekar_verificacion")
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
-SLACK_CHANNEL = "#todo-rekar-mensajeria-wtz"
-PORT = int(os.getenv("PORT", 10000))
+SLACK_CHANNEL = os.getenv("SLACK_CHANNEL", "#todo-rekar-mensajeria-wtz")
 
-SLACK_HEADERS = {
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {SLACK_BOT_TOKEN}"
-}
+EMAIL_DESTINATION = os.getenv("EMAIL_DESTINATION")
+EMAIL_SENDER = os.getenv("EMAIL_SENDER")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 
-# ======= MEMORIA DE CLIENTES =======
-CLIENTES_FILE = "clientes.json"
+last_contact = {}
 
-def cargar_clientes():
-    try:
-        with open(CLIENTES_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {}
-
-def guardar_clientes(data):
-    with open(CLIENTES_FILE, "w") as f:
-        json.dump(data, f)
-
-clientes = cargar_clientes()
-
-# ======= FUNCIONES =======
-
-def enviar_whatsapp(numero, mensaje):
-    url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
+def send_whatsapp_message(phone, message):
+    url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
     data = {
         "messaging_product": "whatsapp",
-        "to": numero.replace("+",""),
+        "to": phone,
         "type": "text",
-        "text": {"body": mensaje}
+        "text": {"body": message}
     }
+    response = requests.post(url, headers=headers, json=data)
+    print("📤 Enviado a WhatsApp:", response.status_code, response.text)
+    return response.status_code == 200
+
+def send_slack_message(text):
+    url = "https://slack.com/api/chat.postMessage"
+    headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}"}
+    data = {"channel": SLACK_CHANNEL, "text": text}
     r = requests.post(url, headers=headers, json=data)
-    print(f"📤 WA -> {numero} ({r.status_code}): {r.text}")
+    print("📩 Enviado a Slack:", r.status_code, r.text)
+    return r.status_code == 200
 
-def slack_post(msg):
-    r = requests.post("https://slack.com/api/chat.postMessage",
-                      headers=SLACK_HEADERS,
-                      json={"channel": SLACK_CHANNEL, "text": msg})
-    print(f"📤 Slack -> {r.status_code}: {r.text}")
+def send_email(subject, body):
+    if not EMAIL_DESTINATION: return
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = EMAIL_SENDER
+    msg["To"] = EMAIL_DESTINATION
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.send_message(msg)
+        print("📧 Email enviado correctamente")
+    except Exception as e:
+        print("❌ Error al enviar email:", e)
 
-# ======= RUTAS =======
+def need_new_greeting(phone):
+    now = time.time()
+    if phone not in last_contact:
+        last_contact[phone] = now
+        return True
+    if now - last_contact[phone] > 1800:  # 30 min
+        last_contact[phone] = now
+        return True
+    return False
 
-@app.route("/", methods=["GET"])
-def home():
-    return "✅ REKAR Bot conectado correctamente.", 200
-
-# --- Verificación de webhook de Meta ---
-@app.route("/webhook", methods=["GET"])
-def verify_webhook():
-    mode = request.args.get("hub.mode")
+@app.route('/webhook', methods=['GET'])
+def verify_token():
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
+    if token == VERIFY_TOKEN:
+        return challenge
+    return "Token inválido", 403
 
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        print("✔ Webhook verificado correctamente.")
-        return challenge, 200
-    else:
-        print("❌ Error de verificación del webhook.")
-        return "Error de verificación", 403
-
-# --- Recepción de mensajes desde WhatsApp ---
-@app.route("/webhook", methods=["POST"])
-def receive_message():
+@app.route('/webhook', methods=['POST'])
+def webhook():
     data = request.get_json()
-    print("📩 WA recibido:", json.dumps(data, ensure_ascii=False))
+    print("📥 Mensaje recibido:", data)
 
     try:
-        entry = data["entry"][0]["changes"][0]["value"]
-        if "messages" not in entry:
-            return "no messages", 200
+        changes = data["entry"][0]["changes"][0]["value"]
+        if "messages" in changes:
+            msg = changes["messages"][0]
+            phone = msg["from"]
+            text = msg["text"]["body"].strip().lower()
 
-        msg = entry["messages"][0]
-        numero = msg["from"]
-        texto = msg.get("text", {}).get("body", "").strip()
-        timestamp = time.time()
-
-        # Si el cliente es nuevo
-        if numero not in clientes:
-            clientes[numero] = {"nombre": None, "ultimo_mensaje": timestamp}
-            guardar_clientes(clientes)
-            enviar_whatsapp(numero, "👋 ¡Hola! Soy el asistente de REKAR. ¿Podrías decirme tu nombre para registrarte?")
-            slack_post(f"🆕 Nuevo cliente: {numero} escribió: {texto}")
-        else:
-            cliente = clientes[numero]
-            cliente["ultimo_mensaje"] = timestamp
-            guardar_clientes(clientes)
-
-            if cliente["nombre"] is None:
-                cliente["nombre"] = texto
-                guardar_clientes(clientes)
-                enviar_whatsapp(numero, f"¡Gracias {texto}! 😊 ¿En qué puedo ayudarte hoy?")
-                slack_post(f"✅ {texto} ({numero}) se registró correctamente.")
+            if need_new_greeting(phone):
+                saludo = ("¡Hola! Soy *RekyBot 🤖* de *REKAR*, red de enfermería y kinesiología.\n"
+                          "Nuestro horario de atención es de *lunes a viernes de 8 a 18 hs*.\n\n"
+                          "¿Podés decirme tu nombre, por favor?")
+                send_whatsapp_message(phone, saludo)
+                send_slack_message(f"📞 Nuevo contacto: {phone}")
+                send_email("Nuevo contacto REKAR", f"Teléfono: {phone}\nMensaje: {text}")
+            elif "soy" in text or "me llamo" in text:
+                nombre = text.replace("soy", "").replace("me llamo", "").strip()
+                send_whatsapp_message(phone, f"Gracias {nombre}. Un operador humano de REKAR se pondrá en contacto contigo pronto.\nPor favor, dejanos tu consulta.")
+                send_slack_message(f"👤 {nombre} ({phone}) se registró y espera atención.")
+                send_email("Cliente identificado", f"Nombre: {nombre}\nTeléfono: {phone}")
             else:
-                enviar_whatsapp(numero, f"👋 Hola de nuevo, {cliente['nombre']}. ¿Querés continuar con tu consulta?")
-                slack_post(f"📨 {cliente['nombre']} ({numero}) dice: {texto}")
+                send_slack_message(f"📨 {phone}: {text}")
 
     except Exception as e:
-        print("⚠️ Error procesando el mensaje:", e)
+        print("❌ Error procesando mensaje:", e)
 
-    return "EVENT_RECEIVED", 200
+    return jsonify({"status": "ok"}), 200
 
-# --- Mensajes desde Slack hacia WhatsApp ---
-@app.route("/slack/events", methods=["POST"])
+@app.route('/slack/events', methods=['POST'])
 def slack_events():
     data = request.get_json()
-    print("📥 Slack evento:", json.dumps(data, ensure_ascii=False))
+    print("📥 Slack evento:", data)
 
     if "challenge" in data:
         return jsonify({"challenge": data["challenge"]})
 
-    event = data.get("event", {})
-    text = (event.get("text") or "").strip()
-    user = event.get("user")
+    try:
+        event = data.get("event", {})
+        if event.get("type") == "message" and not event.get("bot_id"):
+            text = event.get("text", "")
+            if text.startswith("+549"):
+                parts = text.split(" ", 1)
+                if len(parts) == 2:
+                    phone, msg = parts
+                    send_whatsapp_message(phone.replace("+", ""), msg)
+                    send_slack_message(f"✅ Mensaje enviado a {phone}")
+    except Exception as e:
+        print("❌ Error evento Slack:", e)
 
-    if not text or not user:
-        return "ignore", 200
+    return jsonify({"status": "ok"}), 200
 
-    # formato: +54911XXXX mensaje
-    if text.startswith("+549"):
-        try:
-            partes = text.split(" ", 1)
-            if len(partes) == 2:
-                numero, mensaje = partes
-                enviar_whatsapp(numero, mensaje)
-                slack_post(f"✅ Mensaje enviado a {numero}: {mensaje}")
-            else:
-                slack_post("⚠️ Formato incorrecto. Usa: `+54911XXXX mensaje`")
-        except Exception as e:
-            slack_post(f"❌ Error enviando mensaje: {e}")
-    else:
-        slack_post("💬 Para responder a un cliente, usa: `+54911XXXX mensaje`")
-
-    return "ok", 200
-
-
-if __name__ == "__main__":
-    print("🚀 BOT INICIADO Y ESCUCHANDO...")
-    app.run(host="0.0.0.0", port=PORT)
+if __name__ == '__main__':
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
