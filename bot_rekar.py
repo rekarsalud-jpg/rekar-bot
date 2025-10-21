@@ -67,20 +67,28 @@ def send_telegram_message(text, reply_to=None):
 
 
 def ask_gemini(prompt):
-    """Pregunta a Gemini si la API está activa"""
+    """Consulta a Gemini 1.5 Flash (Google AI)"""
     if not GEMINI_API_KEY:
         return "🤖 Gracias por tu consulta. En breve agregaremos más funciones inteligentes."
+
     try:
         url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {GEMINI_API_KEY}"
+        }
         data = {"contents": [{"parts": [{"text": prompt}]}]}
-        params = {"key": GEMINI_API_KEY}
-        r = requests.post(url, headers=headers, params=params, json=data)
-        return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        r = requests.post(url, headers=headers, json=data)
+
+        if r.status_code == 200:
+            response = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+            return response
+        else:
+            print("⚠️ Error Gemini:", r.text)
+            return "⚠️ Hubo un problema consultando a la IA. Intentá más tarde."
     except Exception as e:
         print("⚠️ Error Gemini:", e)
         return "⚠️ Hubo un problema consultando a la IA. Intentá más tarde."
-
 
 def save_contact(phone, name):
     """Guarda contacto (estructura base para Google Sheets)"""
@@ -265,3 +273,4 @@ def telegram_webhook():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
