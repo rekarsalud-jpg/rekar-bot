@@ -1,2 +1,4 @@
-flask==3.0.3
+Flask==3.0.0
 requests==2.31.0
+gspread==6.0.2
+oauth2client==4.1.3
