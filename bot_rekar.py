@@ -1,74 +1,94 @@
 import os
 import time
+import requests
 from datetime import datetime
 from flask import Flask, request, jsonify
-import requests
 import smtplib
 from email.mime.text import MIMEText
 from email.utils import formatdate
 
 app = Flask(__name__)
 
-# ========= Variables de entorno =========
-ACCESS_TOKEN = os.getenv("ACCESS_TOKEN") # WhatsApp
+# ====== ENTORNO ======
+ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") # Telegram
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") # ID del grupo/canal donde avisa
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = str(os.getenv("TELEGRAM_CHAT_ID", "")).strip()
 
-# Email (opcional para avisos y/o fallback de registro)
-EMAIL_SENDER = os.getenv("EMAIL_SENDER") # ej: rekar.salud@gmail.com
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD") # App Password (16 caracteres)
-EMAIL_DESTINATION = os.getenv("EMAIL_DESTINATION", EMAIL_SENDER) # si no hay destino, usa remitente
+SHEET_WEBHOOK_URL = os.getenv("SHEET_WEBHOOK_URL", "").strip() # Apps Script Web App (opcional)
+EMAIL_SENDER = os.getenv("EMAIL_SENDER", "")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
+EMAIL_DESTINATION = os.getenv("EMAIL_DESTINATION", EMAIL_SENDER)
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 
-# Registro en Google Sheets (opcional). Si no lo definís, cae a email.
-# Configurá en SHEET_WEBHOOK_URL una “Web App” de Apps Script que agregue filas.
-SHEET_WEBHOOK_URL = os.getenv("SHEET_WEBHOOK_URL", "").strip()
+# ====== ESTADO EN MEMORIA ======
+# contacto -> estado de conversación
+conversations = {} # phone -> {"mode": "menu|espera_nombre|humano|asistente", "name": str, "last_ts": float}
 
-# ========= Estado en memoria =========
-last_contact = {} # phone -> ts último saludo para “cooldown”
-active_conversations = {} # phone -> {"mode": "menu"|"humano"|"asistente"|"silencio", "until": ts, "name": str}
+# asociación Telegram <-> WhatsApp para respuestas por "reply"
+tg_msgid_to_phone = {} # tg_message_id -> phone
+phone_to_tgmsg_id = {} # phone -> last tg message id anunciado
 
-# ========= Utilidades =========
+HUMAN_TTL = 15 * 60 # 15 minutos de silencio del bot cuando un humano toma la conversación
+
+# ====== UTILS ======
 def now_iso():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-def within(sec: int, ts: float) -> bool:
-    return (time.time() - ts) < sec
+def ensure_contact(phone):
+    if phone not in conversations:
+        conversations[phone] = {"mode": "espera_nombre", "name": "", "last_ts": 0}
+    return conversations[phone]
 
-# ========= Envíos =========
-def send_whatsapp_message(phone: str, text: str) -> bool:
-    """Envía texto por WhatsApp Cloud API."""
+def set_mode(phone, mode):
+    info = ensure_contact(phone)
+    info["mode"] = mode
+    info["last_ts"] = time.time()
+
+def set_name(phone, name):
+    info = ensure_contact(phone)
+    info["name"] = name.strip().title()
+    info["last_ts"] = time.time()
+
+def get_name(phone):
+    return ensure_contact(phone).get("name", "")
+
+def mode_is(phone, mode):
+    return ensure_contact(phone).get("mode") == mode
+
+def is_human_active(phone):
+    info = ensure_contact(phone)
+    if info.get("mode") != "humano":
+        return False
+    return (time.time() - info.get("last_ts", 0)) < HUMAN_TTL
+
+# ====== ENVÍOS ======
+def send_whatsapp_text(phone: str, text: str) -> bool:
     url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "messaging_product": "whatsapp",
-        "to": phone,
-        "type": "text",
-        "text": {"body": text}
-    }
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
+    data = {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": text}}
     r = requests.post(url, headers=headers, json=data)
     print("📤 WA ->", r.status_code, r.text)
     return r.status_code == 200
 
-def send_telegram_message(text: str):
-    """Envía mensaje al grupo/canal de Telegram (si está configurado)."""
+def send_telegram_text(text: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram no configurado.")
-        return
+        print("ℹ️ Telegram no configurado.")
+        return None
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
-    r = requests.post(url, json=payload)
+    r = requests.post(url, json=payload, timeout=15)
     print("📨 TG ->", r.status_code, r.text)
+    try:
+        js = r.json()
+        return js.get("result", {}).get("message_id")
+    except Exception:
+        return None
 
 def send_email(subject: str, body: str):
-    """Envío SMTP (opcional)."""
     if not (EMAIL_SENDER and EMAIL_PASSWORD and EMAIL_DESTINATION):
         print("ℹ️ Email no configurado; omitido.")
         return
@@ -86,320 +106,257 @@ def send_email(subject: str, body: str):
     except Exception as e:
         print("❌ Email error:", e)
 
-def append_to_sheet(name: str, phone: str, source: str = "WhatsApp"):
-    """Registra contacto en Google Sheets vía webhook Apps Script (opcional)."""
-    if not SHEET_WEBHOOK_URL:
-        # Fallback: avisa por email para dejar rastro
-        send_email(
-            "Registro de contacto (fallback)",
-            f"{now_iso()} | {source}\nNombre: {name or '-'}\nTel: {phone}"
-        )
-        return
+def append_to_sheet(name: str, phone: str, last_msg: str, source: str = "WhatsApp"):
+    if SHEET_WEBHOOK_URL:
+        try:
+            payload = {"timestamp": now_iso(), "name": name or "", "phone": phone, "message": last_msg or "", "source": source}
+            r = requests.post(SHEET_WEBHOOK_URL, json=payload, timeout=10)
+            print("🧾 Sheet ->", r.status_code, r.text)
+            return
+        except Exception as e:
+            print("❌ Sheet error:", e)
+    # Fallback por email si no hay Sheet
+    send_email("Registro de contacto", f"{now_iso()} | {source}\nNombre: {name or '(desconocido)'}\nTel: {phone}\nMensaje: {last_msg}")
 
-    try:
-        payload = {
-            "timestamp": now_iso(),
-            "name": name or "",
-            "phone": phone,
-            "source": source
-        }
-        r = requests.post(SHEET_WEBHOOK_URL, json=payload, timeout=10)
-        print("🧾 Sheet webhook ->", r.status_code, r.text)
-    except Exception as e:
-        print("❌ Sheet webhook error:", e)
-
-# ========= Plantillas =========
-def saludo_inicial() -> str:
+# ====== MENSAJES ======
+def greeting() -> str:
     return (
-        "¡Hola! Soy *RekyBot 🤖* de *REKAR*, red de enfermería y kinesiología.\n"
-        "Atendemos *lunes a sábado de 9 a 19 hs*.\n\n"
+        "👋 ¡Hola! Soy *RekyBot*, asistente virtual de *REKAR*. 😊\n"
+        "Gracias por escribirnos, ¡nos alegra saber de vos!\n"
+        "Nuestro horario es *lunes a sábado de 9 a 19 hs*.\n\n"
         "¿Cómo te llamás?"
     )
 
-def menu_principal(nombre: str = "") -> str:
-    pref = f"Gracias {nombre} 🙌\n" if nombre else ""
+def main_menu(nombre="") -> str:
+    pref = f"¡Genial, *{nombre}*! 🌟\n" if nombre else ""
     return (
-        f"{pref}Seleccioná una opción:\n"
-        "1️⃣ Enviar tu CV a rekar.salud@gmail.com\n"
+        f"{pref}Elegí una opción:\n"
+        "1️⃣ Enviar tu CV (rekar.salud@gmail.com)\n"
         "2️⃣ Requisitos para trabajar en REKAR\n"
-        "3️⃣ Ingresar a nuestra web\n"
-        "4️⃣ Formulario para base de datos\n"
+        "3️⃣ Ingresar a la web institucional\n"
+        "4️⃣ Completar formulario de base de datos\n"
         "5️⃣ Información sobre REKAR\n"
         "6️⃣ Hablar con un representante humano\n"
-        "7️⃣ Seguir chateando con *RekyBot* (IA)\n"
+        "7️⃣ Seguir chateando con *RekyBot* (modo asistente)\n"
     )
 
-def post_accion() -> str:
-    return "¿Querés *volver al menú* o *salir*?"
+def post_action_hint() -> str:
+    return "Escribí *M* para volver al *menú* o *S* para *salir*."
 
-# ========= Lógica auxiliar =========
-def need_new_greeting(phone: str) -> bool:
-    """Saluda si es primer contacto o pasaron 30 min desde la última vez."""
-    now = time.time()
-    last = last_contact.get(phone, 0)
-    if (now - last) > 1800: # 30 minutos
-        last_contact[phone] = now
-        return True
-    return False
-
-def set_mode(phone: str, mode: str, ttl_sec: int = 600):
-    active_conversations[phone] = {
-        "mode": mode,
-        "until": time.time() + ttl_sec,
-        "name": active_conversations.get(phone, {}).get("name", "")
-    }
-
-def get_mode(phone: str) -> str:
-    info = active_conversations.get(phone)
-    if not info:
-        return "menu"
-    if time.time() > info.get("until", 0):
-        return "menu"
-    return info.get("mode", "menu")
-
-def set_name(phone: str, name: str):
-    info = active_conversations.get(phone, {})
-    info["name"] = name
-    info["until"] = time.time() + 600
-    info["mode"] = info.get("mode", "menu")
-    active_conversations[phone] = info
-
-def get_name(phone: str) -> str:
-    return active_conversations.get(phone, {}).get("name", "")
-
-# ========= Asistente híbrido =========
+# ====== ASISTENTE HÍBRIDO ======
 FAQ = [
-    # Requisitos profesionales
-    (["requisito", "trabajar", "matricula", "monotributo", "mala praxis"],
-     "Para trabajar con REKAR: *Kinesiólogos* y *Enfermeros/as* con matrícula *provincial y nacional*, monotributo activo y *seguro de mala praxis*."),
-    # Zonas
-    (["zona", "sur", "oeste", "cobertura", "donde trabajan"],
+    (["requisito","trabajar","matricula","monotributo","mala praxis"],
+     "Para trabajar con REKAR: Kinesiólogos/as y Enfermeros/as con *matrícula nacional y provincial*, *monotributo activo* y *seguro de mala praxis*."),
+    (["zona","sur","oeste","cobertura","dónde trabajan","donde trabajan"],
      "Hoy operamos en *Zona Sur* y *Zona Oeste* del AMBA. Vamos ampliando según la demanda."),
-    # Servicios
-    (["prestación", "servicio", "guardia", "visita", "domiciliaria", "akm", "akt"],
-     "Conectamos pacientes con profesionales de calidad para *atención domiciliaria*, guardias de enfermería y prestaciones varias (AKM, AKT, etc.)."),
-    # Sueldos / honorarios
-    (["pago", "honorario", "sueldo", "cuánto pagan"],
-     "Los honorarios son competitivos y buscamos mejorar las condiciones para que puedas brindar una atención de *alta calidad*."),
-    # Pacientes particulares
-    (["particular", "precio", "costo", "cuánto sale"],
-     "Podemos cotizar atención particular. Decinos zona, necesidad y cobertura (si tenés). ¡Te orientamos!"),
-    # Documentación / problemas con carga
-    (["documento", "documentación", "subir", "cargar", "problema"],
-     "Si tuviste problemas para subir documentación, indicanos *qué paso falló* y tu *correo*. Te ayudamos a completarlo."),
-    # Obras sociales
-    (["obra social", "prepaga", "institución", "convenio"],
-     "Trabajamos con instituciones y obras sociales. Contanos tu necesidad y armamos el nodo de profesionales.")
+    (["prestación","servicio","guardia","visita","domiciliaria","akm","akt"],
+     "Conectamos pacientes con profesionales para *atención domiciliaria*, guardias de enfermería y prestaciones (AKM, AKT, etc.)."),
+    (["pago","honorario","sueldo","cuánto pagan","cuanto pagan","valores"],
+     "Los honorarios son *competitivos* y apuntamos a mejorar condiciones para brindar atención de *alta calidad*."),
+    (["particular","precio","costo","cuánto sale","cuanto sale"],
+     "Podemos cotizar atención particular. Decinos *zona*, *necesidad* y si tenés *cobertura*."),
+    (["obra social","prepaga","institución","convenio","institucion"],
+     "Trabajamos con obras sociales y entidades. Contanos la necesidad y armamos el nodo de profesionales.")
 ]
 
 def assistant_reply(text: str) -> str:
-    low = text.lower()
-    for keywords, answer in FAQ:
-        if any(k in low for k in keywords):
-            return answer
-    return ("Puedo ayudarte con información sobre REKAR, nuestros *servicios*, "
-            "*requisitos* para trabajar, *zonas* y *documentación*. "
+    t = text.lower()
+    for kws, ans in FAQ:
+        if any(k in t for k in kws):
+            return ans
+    return ("Soy *RekyBot* 🤖. Puedo ayudarte con *servicios, zonas, requisitos, documentación, obras sociales*.\n"
             "¿Podés contarme un poco más?")
 
-# ========= WhatsApp Webhook =========
+# ====== WEBHOOKS ======
 @app.route("/webhook", methods=["GET"])
-def verify_token():
-    token = request.args.get("hub.verify_token")
-    challenge = request.args.get("hub.challenge")
-    if token == VERIFY_TOKEN:
-        return challenge
+def verify():
+    if request.args.get("hub.verify_token") == VERIFY_TOKEN:
+        return request.args.get("hub.challenge")
     return "Token inválido", 403
 
 @app.route("/webhook", methods=["POST"])
-def whatsapp_webhook():
+def whatsapp_in():
     data = request.get_json()
     print("📥 WA in:", data)
-
     try:
         changes = data["entry"][0]["changes"][0]["value"]
-        if "messages" in changes:
-            msg = changes["messages"][0]
-            phone = msg.get("from")
-            # texto puede no venir si es botón/interactive; contemplamos fallback
-            text = msg.get("text", {}).get("body", "").strip()
-            text_low = text.lower()
+        if "messages" not in changes:
+            return jsonify({"status": "ack"}), 200
 
-            # 1) Saludo + pedido de nombre (cuando corresponde)
-            if need_new_greeting(phone):
-                set_mode(phone, "menu")
-                set_name(phone, "")
-                send_whatsapp_message(phone, saludo_inicial())
-                send_telegram_message(f"📞 Nuevo contacto: {phone}\nMensaje: {text or '(sin texto)'}")
-                append_to_sheet("", phone, "WhatsApp")
-                return jsonify({"status": "ok"}), 200
+        msg = changes["messages"][0]
+        phone = msg.get("from")
+        text = msg.get("text", {}).get("body", "").strip()
+        info = ensure_contact(phone)
 
-            mode = get_mode(phone)
-            name = get_name(phone)
+        # Anuncio a Telegram (nombre + número + mensaje)
+        name_show = info["name"] or "(sin nombre aún)"
+        tg_text = f"📲 {name_show} (+{phone}): {text or '(sin texto)'}"
+        mid = send_telegram_text(tg_text)
+        if mid:
+            tg_msgid_to_phone[mid] = phone
+            phone_to_tgmsg_id[phone] = mid
 
-            # 2) Captura de nombre (si no lo tenemos aún)
-            if not name:
-                # Aceptamos “soy …”, “me llamo …” o una sola palabra como nombre
-                if any(p in text_low for p in ["soy ", "me llamo", "mi nombre"]):
-                    possible = (text_low.replace("me llamo", "")
-                                      .replace("mi nombre es", "")
-                                      .replace("soy", "")).strip().title()
-                else:
-                    # Si escribió una o dos palabras, tomarlas como nombre
-                    tokens = [t for t in text.title().split() if t.isalpha()]
-                    possible = " ".join(tokens[:2])
+        # Registro (Sheet o email)
+        append_to_sheet(info["name"], phone, text, source="WhatsApp")
 
-                if possible:
-                    set_name(phone, possible)
-                    append_to_sheet(possible, phone, "WhatsApp")
-                    send_whatsapp_message(phone, menu_principal(possible))
-                    return jsonify({"status":"ok"}), 200
-                else:
-                    # Re-pedir nombre
-                    send_whatsapp_message(phone, "¿Podés decirme tu *nombre*? (por ej: *Soy Ana Pérez*)")
-                    return jsonify({"status":"ok"}), 200
+        # Si humano está activo, no interrumpir con menú
+        if is_human_active(phone):
+            # solo forward a TG (ya hecho) y actualizar timestamp humano
+            info["last_ts"] = time.time()
+            return jsonify({"ok": True}), 200
 
-            # 3) Si está hablando con humano, no interrumpir
-            if mode == "humano":
-                # reenviar al Telegram lo que diga el cliente
-                send_telegram_message(f"💬 {name} ({phone}): {text}")
-                return jsonify({"status":"ok"}), 200
-
-            # 4) Modo asistente IA
-            if mode == "asistente":
-                if text_low in ("menu", "menú", "volver", "salir"):
-                    set_mode(phone, "menu")
-                    send_whatsapp_message(phone, menu_principal(name))
-                else:
-                    reply = assistant_reply(text)
-                    send_whatsapp_message(phone, reply + "\n\n" + post_accion())
-                return jsonify({"status":"ok"}), 200
-
-            # 5) Modo menú (default)
-            # Normalizar selecciones
-            if text_low in ("menu", "menú"):
-                send_whatsapp_message(phone, menu_principal(name))
-                return jsonify({"status":"ok"}), 200
-
-            if text in ("1", "2", "3", "4", "5", "6", "7"):
-                option = text
+        # Flujo de conversación
+        if info["mode"] == "espera_nombre":
+            # Detectar nombre: acepta “soy…”, “me llamo…”, o una o dos palabras
+            low = text.lower()
+            possible = ""
+            if any(p in low for p in ["soy ", "me llamo", "mi nombre"]):
+                possible = (low.replace("me llamo","")
+                              .replace("mi nombre es","")
+                              .replace("soy","")).strip().title()
             else:
-                # Si no es un número, recordatorio de menú
-                send_whatsapp_message(phone, "Si querés volver al *menú*, escribí *menu*.")
-                return jsonify({"status":"ok"}), 200
+                tokens = [tok for tok in text.title().split() if tok.isalpha()]
+                possible = " ".join(tokens[:2])
+            if possible:
+                set_name(phone, possible)
+                set_mode(phone, "menu")
+                send_whatsapp_text(phone, f"¡Encantado, *{possible}*! 😊")
+                send_whatsapp_text(phone, main_menu(possible))
+            else:
+                send_whatsapp_text(phone, "¿Me decís tu *nombre*? (Ej: *Soy Ana Pérez*)")
+            return jsonify({"ok": True}), 200
 
-            if option == "1":
-                send_whatsapp_message(phone, "Podés enviar tu *CV* a: rekar.salud@gmail.com")
-                send_whatsapp_message(phone, post_accion())
+        # Atajos M/S
+        if text.lower() == "m":
+            set_mode(phone, "menu")
+            send_whatsapp_text(phone, main_menu(get_name(phone)))
+            return jsonify({"ok": True}), 200
+        if text.lower() == "s":
+            set_mode(phone, "menu")
+            send_whatsapp_text(phone, "¡Gracias por contactarte con *REKAR*! 🙌 Cuando necesites, escribinos de nuevo.")
+            return jsonify({"ok": True}), 200
 
-            elif option == "2":
-                send_whatsapp_message(
-                    phone,
+        # Modo asistente
+        if info["mode"] == "asistente":
+            if text.lower() in ("menu","menú","m"):
+                set_mode(phone, "menu")
+                send_whatsapp_text(phone, main_menu(get_name(phone)))
+            else:
+                ans = assistant_reply(text)
+                send_whatsapp_text(phone, ans + "\n\n" + post_action_hint())
+            return jsonify({"ok": True}), 200
+
+        # Modo menú
+        if info["mode"] == "menu":
+            if text == "1":
+                send_whatsapp_text(phone, "Podés enviar tu *CV* a: rekar.salud@gmail.com\n" + post_action_hint())
+            elif text == "2":
+                send_whatsapp_text(phone,
                     "Requisitos REKAR:\n"
-                    "• *Kinesiólogo/a* con *matrícula provincial y nacional*\n"
-                    "• *Enfermero/a prof. o Lic. en Enfermería* con *matrícula prov. y nac.*\n"
+                    "• Kinesiólogo/a con *matrícula provincial y nacional*\n"
+                    "• Enfermero/a prof. o Lic. con *matrícula prov. y nac.*\n"
                     "• *Monotributo* activo\n"
-                    "• *Seguro de mala praxis*"
+                    "• *Seguro de mala praxis*\n\n" + post_action_hint()
                 )
-                send_whatsapp_message(phone, post_accion())
-
-            elif option == "3":
-                send_whatsapp_message(
-                    phone,
-                    "Nuestra web (reemplazar cuando tengas el link definitivo):\n"
-                    "https://rekarsalud.blogspot.com/?m=1"
-                )
-                send_whatsapp_message(phone, post_accion())
-
-            elif option == "4":
-                send_whatsapp_message(
-                    phone,
-                    "Formulario para base de datos (agregá tu link cuando lo tengas):\n"
-                    "👉 [pendiente de cargar]"
-                )
-                send_whatsapp_message(phone, post_accion())
-
-            elif option == "5":
-                send_whatsapp_message(
-                    phone,
+            elif text == "3":
+                send_whatsapp_text(phone, "🌐 Web: https://rekarsalud.blogspot.com/?m=1\n" + post_action_hint())
+            elif text == "4":
+                send_whatsapp_text(phone, "📋 Formulario de base de datos: [pendiente de link]\n" + post_action_hint())
+            elif text == "5":
+                send_whatsapp_text(phone,
                     "Somos *REKAR*: conectamos pacientes con profesionales de calidad.\n"
-                    "Operamos en *Zona Sur* y *Zona Oeste* del AMBA.\n"
-                    "Creamos *nodos* donde hay demanda para que tengas *cartera cerca*.\n"
-                    "Capacitamos a profesionales y buscamos honorarios *competitivos*."
+                    "Operamos en *Zona Sur* y *Zona Oeste* del AMBA*, formando *nodos* según demanda.\n"
+                    "Capacitamos profesionales y buscamos honorarios *competitivos*.\n\n" + post_action_hint()
                 )
-                send_whatsapp_message(phone, post_accion())
-
-            elif option == "6":
-                set_mode(phone, "humano", ttl_sec=3600) # 1 hora
-                send_whatsapp_message(phone, "Perfecto. Un representante humano te escribirá por este medio. 😊")
-                send_telegram_message(f"📞 {name} ({phone}) solicita hablar con un representante.")
-                # No mostramos menú para no interrumpir
-
-            elif option == "7":
+            elif text == "6":
+                set_mode(phone, "humano")
+                send_whatsapp_text(phone, "Perfecto. Un representante humano te escribirá por este medio. 😊")
+                send_telegram_text(f"📞 {get_name(phone) or '(sin nombre)'} (+{phone}) solicitó hablar con un representante.")
+            elif text == "7":
                 set_mode(phone, "asistente")
-                send_whatsapp_message(
-                    phone,
-                    "Entraste al modo *RekyBot* (IA liviana). Preguntame sobre requisitos, zonas, servicios, "
-                    "honorarios o documentación. Escribí *menu* para volver."
-                )
+                send_whatsapp_text(phone, "Entraste al modo *RekyBot* 🤖. Preguntame sobre *requisitos, zonas, servicios, honorarios o documentación*.\nEscribí *M* para volver al menú.")
+            else:
+                # recordatorio de menú
+                send_whatsapp_text(phone, "Si querés volver al *menú*, escribí *M*. Para salir, *S*.")
+            return jsonify({"ok": True}), 200
 
-            return jsonify({"status":"ok"}), 200
-
-        # Si llegó “statuses” (confirmaciones de entrega), ignorar
     except Exception as e:
         print("❌ Error WA webhook:", e)
 
-    return jsonify({"status": "ok"}), 200
+    return jsonify({"ok": True}), 200
 
-# ========= Telegram webhook (para /enviar desde el grupo) =========
+# ====== TELEGRAM WEBHOOK (responder por REPLY) ======
 @app.route("/telegram", methods=["POST"])
-def telegram_webhook():
+def telegram_in():
     data = request.get_json()
     print("🤖 TG in:", data)
 
     try:
         if "message" not in data:
-            return jsonify({"status":"ignored"}), 200
+            return jsonify({"ok": True}), 200
 
         msg = data["message"]
         chat_id = str(msg["chat"]["id"])
+        if TELEGRAM_CHAT_ID and chat_id != TELEGRAM_CHAT_ID:
+            # Ignorar mensajes de otros chats
+            return jsonify({"ok": True}), 200
+
         text = msg.get("text", "")
+        reply_to = msg.get("reply_to_message")
 
-        # Asegurar que venga del grupo/canal que configuraste
-        if TELEGRAM_CHAT_ID and chat_id != str(TELEGRAM_CHAT_ID):
-            print("Mensaje de otro chat; ignorado.")
-            return jsonify({"status":"ignored"}), 200
-
-        if text and text.startswith("/enviar"):
-            # Formato: /enviar 54911xxxxxx mensaje libre
-            try:
-                parts = text.split(" ", 2)
-                if len(parts) < 3:
-                    send_telegram_message("⚠️ Formato: /enviar <5491xxxxxxxx> <mensaje>")
-                    return jsonify({"status":"ok"}), 200
-
-                phone = parts[1].replace("+", "").strip()
-                reply = parts[2].strip()
-
-                if send_whatsapp_message(phone, reply):
-                    # Activamos modo humano para ese phone y no interrumpir con menú por 10 min
-                    set_mode(phone, "humano", ttl_sec=600)
-                    send_telegram_message(f"✅ Enviado a {phone}")
+        # 1) Si responden por REPLY a un mensaje del bot (que anunciaba un WA),
+        # usamos ese hilo para obtener el teléfono.
+        if reply_to:
+            replied_id = reply_to.get("message_id")
+            phone = tg_msgid_to_phone.get(replied_id)
+            if phone:
+                # Enviar al WA y entrar en modo humano (silencio del bot 15 min)
+                ok = send_whatsapp_text(phone, text)
+                if ok:
+                    set_mode(phone, "humano")
+                    conversations[phone]["last_ts"] = time.time()
+                    send_telegram_text(f"✅ Enviado a +{phone}")
                 else:
-                    send_telegram_message(f"❌ No se pudo enviar a {phone}")
-            except Exception as e:
-                print("❌ Error /enviar:", e)
-                send_telegram_message("❌ Error procesando /enviar")
+                    send_telegram_text(f"❌ No se pudo enviar a +{phone}")
+                return jsonify({"ok": True}), 200
 
-        else:
-            # Cualquier otro texto en el grupo se ignora para no hacer eco
-            pass
+        # 2) Fallback: si no hay reply, aceptar formato +549... al inicio
+        if text.startswith(("+", "549", "54")) and " " in text:
+            parts = text.split(" ", 1)
+            phone_guess = parts[0].replace("+", "")
+            body = parts[1].strip()
+            ok = send_whatsapp_text(phone_guess, body)
+            if ok:
+                set_mode(phone_guess, "humano")
+                conversations[phone_guess]["last_ts"] = time.time()
+                send_telegram_text(f"✅ Enviado a +{phone_guess}")
+            else:
+                send_telegram_text(f"❌ No se pudo enviar a +{phone_guess}")
+            return jsonify({"ok": True}), 200
+
+        # 3) Comando opcional para cerrar manualmente una conversación
+        if text.startswith("/cerrar"):
+            # /cerrar 54911xxxxxx
+            parts = text.split()
+            if len(parts) >= 2:
+                phone = parts[1].replace("+", "")
+                set_mode(phone, "menu")
+                send_whatsapp_text(phone, "Cierro la conversación. Si necesitás algo más, escribí *M* para ver el menú. ¡Gracias! 🙌")
+                send_telegram_text(f"🔚 Conversación con +{phone} cerrada.")
+            else:
+                send_telegram_text("Uso: /cerrar 54911xxxxxx")
+            return jsonify({"ok": True}), 200
+
+        # 4) Si escriben otra cosa sin reply, solo informamos cómo responder
+        send_telegram_text("💡 Respondé por *Reply* al mensaje del cliente para contestarle directo en WhatsApp.\nTambién podés escribir: `+54911... tu mensaje`")
+        return jsonify({"ok": True}), 200
 
     except Exception as e:
         print("❌ TG webhook error:", e)
 
-    return jsonify({"status":"ok"}), 200
+    return jsonify({"ok": True}), 200
 
-# ========= Inicio (solo desarrollo local) =========
+# ====== MAIN (local) ======
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port, debug=False)
