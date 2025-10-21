@@ -1,9 +1,13 @@
 # ==========================================
-# 🤖 REKYBOT 1.4.1 – versión estable (Render)
+# 🤖 REKYBOT 1.5 – versión con Gemini y Google Sheets
 # ==========================================
 
-import os, time, requests
+import os, time, requests, json
 from flask import Flask, request, jsonify
+
+# Librería para Google Sheets
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 app = Flask(__name__)
 
@@ -13,10 +17,18 @@ PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # opcional: activa IA si existe
+
+# Gemini (opcional)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-pro")
+
+# Google Sheets
+GOOGLE_SHEETS_JSON = os.getenv("GOOGLE_SHEETS_JSON")  # JSON del Service Account
+SHEET_NAME = os.getenv("SHEET_NAME", "Contactos Rekar")
 
 # === VARIABLES INTERNAS ===
 active_sessions = {}
+active_conversations = {}
 last_messages = {}
 HUMAN_TTL = 3600  # 60 minutos
 
@@ -25,23 +37,19 @@ HUMAN_TTL = 3600  # 60 minutos
 # ==============================================
 
 def send_whatsapp_text(phone, text):
-    """Envía mensaje a WhatsApp"""
     url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
     data = {
         "messaging_product": "whatsapp",
         "to": phone,
         "type": "text",
-        "text": {"body": text}
+        "text": {"body": text},
     }
     try:
         r = requests.post(url, headers=headers, json=data)
         if r.status_code == 200:
-            print(f"✅ Enviado a WhatsApp {phone}")
             last_messages[phone] = text
+            print(f"✅ Enviado a WhatsApp {phone}")
             return True
         else:
             print(f"❌ Error enviando mensaje: {r.text}")
@@ -66,38 +74,63 @@ def send_telegram_message(text, reply_to=None):
         print(f"⚠️ Error Telegram: {e}")
 
 
+# ==============================================
+# GOOGLE SHEETS
+# ==============================================
+
+def save_contact_to_sheet(name, phone):
+    """Guarda el contacto en Google Sheets"""
+    try:
+        if not GOOGLE_SHEETS_JSON:
+            print("⚠️ No hay credenciales de Sheets configuradas.")
+            return
+        creds_json = json.loads(GOOGLE_SHEETS_JSON)
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
+        client = gspread.authorize(creds)
+        sheet = client.open(SHEET_NAME).sheet1
+
+        existing = sheet.get_all_records()
+        for row in existing:
+            if row.get("Teléfono") == phone:
+                print(f"ℹ️ {phone} ya está registrado.")
+                return
+
+        sheet.append_row([name, phone, time.strftime("%Y-%m-%d %H:%M:%S")])
+        print(f"💾 Guardado en Google Sheets: {name} ({phone})")
+    except Exception as e:
+        print(f"❌ Error guardando en Sheets: {e}")
+
+
+# ==============================================
+# GEMINI – modo asistente
+# ==============================================
+
 def ask_gemini(prompt):
-    """Consulta a Gemini 1.5 Flash (Google AI)"""
+    """Consulta al modelo Gemini (si está configurado)"""
     if not GEMINI_API_KEY:
-        return "🤖 Gracias por tu consulta. En breve agregaremos más funciones inteligentes."
+        return "🤖 Gracias por tu consulta. En breve agregaremos más funciones inteligentes. Escribí M para volver al menú o S para salir."
 
     try:
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {GEMINI_API_KEY}"
-        }
-        data = {"contents": [{"parts": [{"text": prompt}]}]}
-        r = requests.post(url, headers=headers, json=data)
-
-        if r.status_code == 200:
-            response = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-            return response
-        else:
-            print("⚠️ Error Gemini:", r.text)
-            return "⚠️ Hubo un problema consultando a la IA. Intentá más tarde."
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}",
+            headers={"Content-Type": "application/json"},
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+        )
+        data = r.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"]
     except Exception as e:
-        print("⚠️ Error Gemini:", e)
-        return "⚠️ Hubo un problema consultando a la IA. Intentá más tarde."
+        print(f"⚠️ Error con Gemini: {e}")
+        return "🤖 Hubo un problema procesando tu consulta. Escribí M para volver al menú o S para salir."
 
-def save_contact(phone, name):
-    """Guarda contacto (estructura base para Google Sheets)"""
-    print(f"💾 Guardar contacto: {name} - {phone} ({time.ctime()})")
-    # aquí luego agregaremos la conexión a Google Sheets
 
+# ==============================================
+# FUNCIONES DE CONTROL DE SESIÓN
+# ==============================================
 
 def clear_session(phone):
     active_sessions.pop(phone, None)
+    active_conversations.pop(phone, None)
     last_messages.pop(phone, None)
     print(f"🧹 Sesión cerrada para {phone}")
 
@@ -111,7 +144,7 @@ def is_duplicate(phone, text):
 
 
 # ==============================================
-# TEXTOS BASE
+# FLUJOS PRINCIPALES
 # ==============================================
 
 def get_main_menu(name):
@@ -132,8 +165,8 @@ def get_main_menu(name):
 
 def get_greeting():
     return (
-        "👋 ¡Hola! Soy 🤖 *RekyBot 1.4.1*, asistente virtual de *REKAR*. 😊\n"
-        "Gracias por escribirnos. Atendemos de *lunes a sábado de 9 a 19 hs.*\n\n"
+        "👋 ¡Hola! Soy 🤖 *RekyBot 1.5*, asistente virtual de *REKAR*. 😊\n"
+        "¡Gracias por escribirnos! Atendemos de *lunes a sábado de 9 a 19 hs.*\n\n"
         "¿Cómo es tu nombre?"
     )
 
@@ -165,7 +198,6 @@ def webhook():
             clear_session(phone)
             return jsonify({"ok": True}), 200
 
-        # === ESTADOS ===
         if info["state"] == "start":
             send_whatsapp_text(phone, get_greeting())
             info["state"] = "awaiting_name"
@@ -175,7 +207,7 @@ def webhook():
         elif info["state"] == "awaiting_name":
             name = text.split(" ")[0].capitalize()
             info["name"] = name
-            save_contact(phone, name)
+            save_contact_to_sheet(name, phone)
             send_whatsapp_text(phone, get_main_menu(name))
             info["state"] = "menu"
             active_sessions[phone] = info
@@ -189,18 +221,18 @@ def webhook():
             elif choice == "2":
                 send_whatsapp_text(phone, "✅ Requisitos: Título habilitante, matrícula vigente y disponibilidad horaria.")
             elif choice == "3":
-                send_whatsapp_text(phone, "🌐 Visitá nuestra web: [link pendiente]")
+                send_whatsapp_text(phone, "🌐 Visitá nuestra web: https://rekarsalud.blogspot.com/?m=1")
             elif choice == "4":
-                send_whatsapp_text(phone, "🗂️ Completá el formulario: [link pendiente]")
+                send_whatsapp_text(phone, "🗂️ Completá el formulario: [agregar enlace Google Form]")
             elif choice == "5":
                 send_whatsapp_text(phone, "🏥 REKAR brinda servicios domiciliarios de kinesiología y enfermería en CABA y GBA.")
             elif choice == "6":
                 send_whatsapp_text(phone, "🧑‍💼 Un representante fue notificado. Te contactará a la brevedad.")
-                send_telegram_message(f"📞 Nuevo cliente quiere hablar con un representante:\n{info['name']} (+{phone})")
+                send_telegram_message(f"📞 Nuevo cliente quiere hablar con un representante:\n{info.get('name','Cliente')} (+{phone})")
                 info["state"] = "human_mode"
                 info["time"] = time.time()
             elif choice == "7":
-                send_whatsapp_text(phone, "💬 Estás chateando con RekyBot Asistente. Podés hacerme preguntas sobre nuestros servicios.")
+                send_whatsapp_text(phone, "💬 Ahora estás chateando con *RekyBot Asistente*. Podés hacerme preguntas sobre nuestros servicios.")
                 info["state"] = "assistant_mode"
                 info["time"] = time.time()
             elif choice == "8":
@@ -217,15 +249,15 @@ def webhook():
             elapsed = time.time() - info.get("time", 0)
             if elapsed < HUMAN_TTL:
                 send_telegram_message(f"💬 {info.get('name', 'Cliente')} (+{phone}): {text}")
-                send_whatsapp_text(phone, "🕐 Gracias por tu mensaje. Un representante ya fue notificado.")
+                send_whatsapp_text(phone, "🕐 Gracias por tu mensaje. Nuestro representante ya fue notificado y te responderá pronto.")
             else:
-                send_whatsapp_text(phone, "⏳ Tu conversación anterior finalizó. Escribí 6 para hablar con un representante.")
+                send_whatsapp_text(phone, "⏳ Tu conversación anterior finalizó. Si querés hablar con alguien, elegí la opción 6 del menú.")
                 info["state"] = "menu"
                 send_whatsapp_text(phone, get_main_menu(info.get("name", "Cliente")))
             return jsonify({"ok": True}), 200
 
         elif info["state"] == "assistant_mode":
-            reply = ask_gemini(f"El usuario escribió: {text}. Respondé como asistente amable de REKAR.")
+            reply = ask_gemini(text)
             send_whatsapp_text(phone, reply)
             return jsonify({"ok": True}), 200
 
@@ -237,7 +269,7 @@ def webhook():
 
 
 # ==============================================
-# WEBHOOK TELEGRAM
+# WEBHOOK TELEGRAM (modo reply)
 # ==============================================
 
 @app.route("/telegram", methods=["POST"])
@@ -247,22 +279,29 @@ def telegram_webhook():
         return jsonify({"ok": True}), 200
 
     msg = data["message"]
-    chat_id = str(msg["chat"]["id"])
     text = msg.get("text", "").strip()
+    reply = msg.get("reply_to_message")
 
-    # Solo mensajes del grupo autorizado
-    if chat_id != str(TELEGRAM_CHAT_ID):
+    # Si se usa "Responder" en Telegram
+    if reply and "+" in reply.get("text", ""):
+        phone = reply["text"].split("+")[-1].split(")")[0].strip()
+        send_whatsapp_text(phone, text)
         return jsonify({"ok": True}), 200
 
-    # Si es respuesta a un mensaje del bot → identificar el número
-    if "reply_to_message" in msg:
-        original = msg["reply_to_message"]["text"]
-        if "(+" in original and ")" in original:
-            phone = original.split("(+")[1].split(")")[0]
-            send_whatsapp_text(phone, text)
-            send_telegram_message(f"✅ Enviado a {phone}", reply_to=msg["message_id"])
-            return jsonify({"ok": True}), 200
+    if text.startswith("/enviar"):
+        try:
+            _, phone, message = text.split(" ", 2)
+            send_whatsapp_text(phone, message)
+        except:
+            send_telegram_message("❌ Formato inválido. Usa: /enviar <número> <mensaje>")
 
+    if text.startswith("/cerrar"):
+        try:
+            _, phone = text.split(" ", 1)
+            clear_session(phone)
+            send_telegram_message(f"✅ Sesión cerrada para {phone}")
+        except:
+            send_telegram_message("❌ Usa /cerrar <número> correctamente.")
     return jsonify({"ok": True}), 200
 
 
@@ -273,4 +312,3 @@ def telegram_webhook():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
