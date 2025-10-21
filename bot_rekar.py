@@ -204,10 +204,10 @@ def whatsapp_in():
             first_of_session = True
 
         # --- SALUDO INICIAL / PEDIDO NOMBRE (solo si corresponde) ---
-        if should_greet(phone):
+        if should_greet(phone) and not info["notified_first"]:
             set_mode(phone, "espera_nombre")
             send_whatsapp_text(phone, greeting())
-            info["notified_first"] = False # aún no notificamos hasta recibir nombre o primer texto
+            info["notified_first"] = True # Marca como ya saludado
             info["last_ts"] = time.time()
             return jsonify({"ok": True}), 200
 
@@ -401,3 +401,4 @@ def telegram_in():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port, debug=False)
+
