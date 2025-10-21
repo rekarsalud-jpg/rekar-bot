@@ -1,158 +1,170 @@
 import os
 import time
-from datetime import datetime
-from flask import Flask, request, jsonify
 import requests
-import smtplib
-from email.mime.text import MIMEText
+import pandas as pd
+from flask import Flask, request, jsonify
+from datetime import datetime
 
 app = Flask(__name__)
 
-# === VARIABLES DE ENTORNO ===
+# === Variables de entorno ===
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
-SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
-SLACK_CHANNEL = os.getenv("SLACK_CHANNEL", "#todo-rekar-mensajeria-wtz")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+SHEET_URL = os.getenv("SHEET_URL")
 
-EMAIL_DESTINATION = os.getenv("EMAIL_DESTINATION")
-EMAIL_SENDER = os.getenv("EMAIL_SENDER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-
-# === VARIABLES DE CONTROL ===
+# === Variables internas ===
 last_contact = {}
-active_conversations = {}
+active_sessions = {}  # Para modo conversacional
+csv_filename = "contactos_rekar.csv"
 
-# === FUNCIONES BASE ===
+# === Funciones básicas ===
 
-def send_whatsapp_message(phone, message):
+def send_whatsapp(phone, text):
     url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN}",
-        "Content-Type": "application/json"
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
+    data = {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": text}}
+    r = requests.post(url, headers=headers, json=data)
+    print("📤 Enviado a WhatsApp:", r.status_code, r.text)
+    return r.status_code == 200
+
+def send_telegram(msg):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
+    r = requests.post(url, data=data)
+    print("📨 Enviado a Telegram:", r.status_code, r.text)
+
+def save_contact(phone, name=None):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    new_entry = pd.DataFrame([[phone, name or "", now]], columns=["Teléfono", "Nombre", "Fecha"])
+    try:
+        if os.path.exists(csv_filename):
+            df = pd.read_csv(csv_filename)
+            df = df[df["Teléfono"] != phone]
+            df = pd.concat([df, new_entry], ignore_index=True)
+        else:
+            df = new_entry
+        df.to_csv(csv_filename, index=False)
+        print("💾 Contacto guardado en CSV")
+    except Exception as e:
+        print("❌ Error al guardar CSV:", e)
+
+# === Módulo conversacional híbrido ===
+def rekybot_reply(text):
+    text = text.lower()
+    respuestas = {
+        "servicio": "Ofrecemos servicios de kinesiología y enfermería domiciliaria, con profesionales matriculados y cobertura de distintas obras sociales.",
+        "zona": "Actualmente trabajamos en zona sur y zona oeste del Gran Buenos Aires.",
+        "trabajar": "Podés postularte enviando tu CV a rekar.salud@gmail.com o completando el formulario de ingreso. Requerimos matrícula nacional y provincial, monotributo activo y seguro de mala praxis.",
+        "pago": "Los honorarios varían según la prestación y la obra social. Siempre buscamos ofrecer valores competitivos para nuestros profesionales.",
+        "obra social": "Sí, trabajamos con distintas obras sociales y prepagas. Podés consultarme por alguna en particular.",
+        "paciente": "Atendemos pacientes con patologías respiratorias, traumatológicas, neurológicas y postquirúrgicas. La atención es personalizada.",
+        "hola": "¡Hola! Soy RekyBot 🤖, el asistente virtual de REKAR. ¿En qué puedo ayudarte hoy?",
+        "gracias": "¡De nada! Si querés volver al menú principal, escribí 'salir' o 'menú'."
     }
-    data = {
-        "messaging_product": "whatsapp",
-        "to": phone,
-        "type": "text",
-        "text": {"body": message}
-    }
-    response = requests.post(url, headers=headers, json=data)
-    print("📤 Enviado a WhatsApp:", response.status_code, response.text)
-    return response.status_code == 200
 
-def send_telegram_message(text):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram no configurado.")
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    data = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
-    r = requests.post(url, json=data)
-    print("📩 Enviado a Telegram:", r.status_code, r.text)
+    for key, val in respuestas.items():
+        if key in text:
+            return val
 
-def need_new_greeting(phone):
-    now = time.time()
-    if phone not in last_contact:
-        last_contact[phone] = now
-        return True
-    if now - last_contact[phone] > 1800:  # 30 minutos
-        last_contact[phone] = now
-        return True
-    return False
+    return ("Soy RekyBot 🤖, tu asistente virtual de Rekar. "
+            "Puedo ayudarte con información sobre nuestros servicios, zonas, requisitos para trabajar o atención a pacientes.")
 
-# === WEBHOOK WHATSAPP ===
-@app.route('/webhook', methods=['GET'])
-def verify_token():
+# === Menú principal ===
+def menu_principal():
+    return (
+        "👋 ¡Hola! Soy *RekyBot 🤖* de *REKAR*, red de enfermería y kinesiología.\n\n"
+        "Por favor elegí una opción:\n"
+        "1️⃣ Enviar tu CV por mail\n"
+        "2️⃣ Requisitos para trabajar en REKAR\n"
+        "3️⃣ Ingresar a la web institucional\n"
+        "4️⃣ Completar el formulario de ingreso\n"
+        "5️⃣ Información sobre REKAR\n"
+        "6️⃣ Hablar con un representante humano\n"
+        "7️⃣ Continuar hablando con RekyBot 🤖"
+    )
+
+# === Webhooks ===
+@app.route("/webhook", methods=["GET"])
+def verify():
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
     if token == VERIFY_TOKEN:
         return challenge
     return "Token inválido", 403
 
-
-@app.route('/webhook', methods=['POST'])
+@app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
     print("📥 Mensaje recibido:", data)
 
     try:
-        changes = data["entry"][0]["changes"][0]["value"]
-        if "messages" in changes:
-            msg = changes["messages"][0]
-            phone = msg["from"]
-            text = msg["text"]["body"].strip().lower()
+        msg = data["entry"][0]["changes"][0]["value"]["messages"][0]
+        phone = msg["from"]
+        text = msg["text"]["body"].strip().lower()
 
-            # Si hay una conversación activa, no mostrar menú
-            if phone in active_conversations and active_conversations[phone]:
-                send_telegram_message(f"💬 {phone}: {text}")
-                return jsonify({"status": "ok"}), 200
-
-            # Saludo inicial
-            if need_new_greeting(phone):
-                saludo = ("👋 ¡Hola! Soy *RekyBot* de *REKAR*, red de enfermería y kinesiología.\n"
-                          "Nuestro horario de atención es de *lunes a sábado de 9 a 19 hs*.\n\n"
-                          "¿Podés decirme tu nombre, por favor?")
-                send_whatsapp_message(phone, saludo)
-                send_telegram_message(f"📞 Nuevo contacto: {phone}")
-            elif "soy" in text or "me llamo" in text:
-                nombre = text.replace("soy", "").replace("me llamo", "").strip().title()
-                active_conversations[phone] = True
-                send_whatsapp_message(phone, f"Gracias {nombre}. Un operador humano de REKAR se pondrá en contacto contigo pronto.\nPor favor, dejanos tu consulta.")
-                send_telegram_message(f"👤 {nombre} ({phone}) se registró y espera atención.")
+        # Modo conversacional activo
+        if active_sessions.get(phone):
+            if any(word in text for word in ["salir", "menu", "menú", "volver"]):
+                active_sessions.pop(phone, None)
+                send_whatsapp(phone, "Has salido del modo conversación. Volviendo al menú principal ⤴️")
+                send_whatsapp(phone, menu_principal())
             else:
-                send_whatsapp_message(phone, "Por favor, decime tu nombre para poder ayudarte 🙂")
-                send_telegram_message(f"📨 {phone}: {text}")
+                reply = rekybot_reply(text)
+                send_whatsapp(phone, reply)
+            return jsonify({"status": "ok"}), 200
+
+        # Nuevo contacto o reanudación
+        if phone not in last_contact or (time.time() - last_contact.get(phone, 0)) > 1800:
+            last_contact[phone] = time.time()
+            send_whatsapp(phone, menu_principal())
+            save_contact(phone)
+            send_telegram(f"📞 Nuevo contacto desde WhatsApp: {phone}")
+            return jsonify({"status": "ok"}), 200
+
+        # Opciones del menú
+        if text == "1":
+            send_whatsapp(phone, "Podés enviar tu CV a 📧 rekar.salud@gmail.com")
+        elif text == "2":
+            send_whatsapp(phone, "Requisitos: Kinesiólogo o enfermero con matrícula nacional y provincial, monotributo activo y seguro de mala praxis.")
+        elif text == "3":
+            send_whatsapp(phone, "🌐 Web: [Agregá tu link aquí]")
+        elif text == "4":
+            send_whatsapp(phone, "📋 Formulario de ingreso: [Agregá tu link aquí]")
+        elif text == "5":
+            send_whatsapp(phone, "Somos una red de kinesiología y enfermería que conecta pacientes, profesionales y obras sociales. Operamos en zona sur y oeste del GBA.")
+        elif text == "6":
+            send_whatsapp(phone, "Un representante humano se pondrá en contacto contigo en breve. ¡Gracias por tu mensaje!")
+            send_telegram(f"📩 Cliente quiere hablar con un representante: {phone}")
+        elif text == "7":
+            active_sessions[phone] = True
+            send_whatsapp(phone, "Entraste al modo conversación con RekyBot 🤖. Podés hacerme preguntas sobre nuestros servicios, requisitos o zonas. Escribí 'salir' para volver al menú.")
+        else:
+            send_whatsapp(phone, "Por favor elegí una opción válida del menú principal.")
+            send_whatsapp(phone, menu_principal())
 
     except Exception as e:
         print("❌ Error procesando mensaje:", e)
 
     return jsonify({"status": "ok"}), 200
 
-
-# === WEBHOOK TELEGRAM ===
+# === Telegram webhook opcional (/enviar) ===
 @app.route("/telegram", methods=["POST"])
 def telegram_webhook():
     data = request.get_json()
-    print("📩 Evento Telegram:", data)
+    print("📥 Telegram:", data)
 
     if "message" in data:
-        msg = data["message"]
-        chat_id = str(msg["chat"]["id"])
-        text = msg.get("text", "")
+        msg = data["message"]["text"]
+        if msg.startswith("/enviar"):
+            parts = msg.split(" ", 2)
+            if len(parts) == 3:
+                phone, text = parts[1], parts[2]
+                send_whatsapp(phone, text)
+                send_telegram(f"✅ Mensaje enviado a {phone}")
+    return jsonify({"ok": True})
 
-        # Asegurar que venga del grupo correcto
-        if chat_id != str(TELEGRAM_CHAT_ID):
-            print("Mensaje ignorado: viene de otro chat.")
-            return jsonify({"status": "ignored"}), 200
-
-        # Detectar comando /enviar
-        if text.startswith("/enviar"):
-            try:
-                parts = text.split(" ", 2)
-                if len(parts) < 3:
-                    send_telegram_message("❌ Formato inválido. Usá: /enviar <número> <mensaje>")
-                    return jsonify({"status": "error"}), 200
-
-                phone = parts[1].replace("+", "").strip()
-                message = parts[2].strip()
-
-                if send_whatsapp_message(phone, message):
-                    active_conversations[phone] = True
-                    send_telegram_message(f"✅ Mensaje enviado a {phone}: {message}")
-                else:
-                    send_telegram_message(f"⚠️ No se pudo enviar el mensaje a {phone}")
-            except Exception as e:
-                print("❌ Error procesando /enviar:", e)
-                send_telegram_message(f"Error al enviar mensaje: {e}")
-
-    return jsonify({"status": "ok"}), 200
-
-
-# === EJECUCIÓN SERVIDOR ===
-if __name__ == '__main__':
-    port = int(os.getenv("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
