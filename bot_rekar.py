@@ -1,3 +1,4 @@
+
 # ==========================================
 # 🤖 REKYBOT v1.5.1 – WhatsApp + Telegram + Gemini + Sheets (estable)
 # ==========================================
@@ -200,37 +201,55 @@ def save_contact_to_sheet(phone, name):
 
 # ======= GEMINI =======
 
-def ask_gemini(prompt):
-    """Consulta al modelo Gemini 1.5 Flash"""
+def ask_gemini(prompt, context_hint=""):
+    """
+    Llama a Gemini 1.5 Flash (latest).
+    Fallback: devuelve None si hay error para que el flujo responda modo "híbrido".
+    """
     if not GEMINI_API_KEY:
-        return "🤖 Gracias por tu consulta. En breve agregaremos más funciones inteligentes. Escribí M para volver al menú o S para salir."
-
+        return None
     try:
-        url = f"{GEMINI_URL}/v1/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-        headers = {
-            "Content-Type": "application/json"
+        url = f"{GEMINI_URL}/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        headers = {"Content-Type": "application/json"}
+        system_hint = (
+            "Sos el asistente de REKAR. Respondé breve, amable y claro. "
+            "Si preguntan por precios, horarios o zonas, respondé con la info conocida: "
+            "horario 9 a 19 hs, zonas CABA y GBA, servicios de kinesiología y enfermería. "
+            "Si falta info exacta, sugerí 'te puede contactar un representante (opción 6)'."
+        )
+        parts = []
+        if context_hint:
+            parts.append({"text": context_hint})
+        parts.append({"text": prompt})
+        body = {"contents": [{"parts": parts}],
+                "safetySettings": [
+                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                ],
+                "generationConfig": {"temperature": 0.4, "maxOutputTokens": 256}
         }
-        data = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [
-                        {"text": prompt}
-                    ]
-                }
-            ]
-        }
+        # prepend system hint vía "system_instruction" (nuevo formato beta)
+        body["systemInstruction"] = {"parts": [{"text": system_hint}]}
 
-        r = requests.post(url, headers=headers, json=data)
-        if r.status_code == 200:
-            response = r.json()
-            return response["candidates"][0]["content"]["parts"][0]["text"]
-        else:
-            print(f"⚠️ Error Gemini: {r.text}")
-            return "⚠️ Hubo un problema procesando tu consulta con la IA. Escribí M para volver al menú o S para salir."
+        r = requests.post(url, headers=headers, json=body, timeout=25)
+        if r.status_code != 200:
+            send_telegram(f"⚠️ Gemini respondió con código {r.status_code}. Error: {r.text[:500]}")
+            return None
+        data = r.json()
+        # navega candidates->content->parts->text
+        candidates = data.get("candidates", [])
+        if not candidates:
+            return None
+        content = candidates[0].get("content", {})
+        parts = content.get("parts", [])
+        if not parts:
+            return None
+        return parts[0].get("text", "").strip()
     except Exception as e:
-        print(f"❌ Error general en Gemini: {e}")
-        return "⚠️ Hubo un problema conectando con Gemini. Intentá más tarde."
+        send_telegram(f"⚠️ Error llamando a Gemini: {e}")
+        return None
 
 # ======= CONTROL DE SESIÓN =======
 
