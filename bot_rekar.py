@@ -18,9 +18,9 @@ GEMINI_URL         = os.getenv("GEMINI_URL", "https://generativelanguage.googlea
 GEMINI_MODEL       = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 # === VARIABLES INTERNAS ===
-sessions = {}             # {phone: {"state":..., "name":..., "time":..., "human_notified":bool}}
-last_user_text = {}       # evita loops
-HUMAN_TTL = 3600          # 60 minutos
+sessions = {}
+last_user_text = {}
+HUMAN_TTL = 3600  # 60 minutos
 
 # ==============================================
 # HELPERS
@@ -99,81 +99,82 @@ def ask_gemini(prompt, context_hint=""):
     """Llama a Gemini 2.0-flash. Devuelve string o None en error."""
     if not GEMINI_API_KEY:
         return None
-try:
-    url = f"{GEMINI_URL}?key={GEMINI_API_KEY}"
-    headers = {"Content-Type": "application/json"}
-except Exception as e:
-    send_telegram_message(f"⚠️ Error inicializando Gemini: {e}")
-    return None
 
-system_hint = (
-    "Sos *RekyBot IA 1.5.2*, el asistente oficial de *REKAR – Red de Enfermería y Kinesiología Argentina*. "
-    "Tu misión es representar a REKAR con calidez, claridad y profesionalismo. "
-    "Tu estilo debe ser humano, empático y confiable, reflejando siempre nuestro lema: "
-    "‘Cuidamos con compromiso, sanamos con empatía’. "
-    "Debés transmitir cercanía, tranquilidad y conocimiento técnico, hablando de manera sencilla, sin tecnicismos innecesarios. "
-    "En REKAR brindamos atención domiciliaria de kinesiología y enfermería, priorizando la calidad humana y la formación continua. "
-    "Nuestro objetivo es acompañar tanto al paciente como a su familia, en un proceso de recuperación seguro y digno dentro del hogar. "
-    "Atendemos de lunes a sábado, de 9 a 19 hs, en Zona Sur, Zona Oeste y Zona Norte del GBA. "
-    "Las sesiones se organizan por paquetes (10 o 20) o mensualmente, buscando la mejor relación costo-calidad. "
-    "La osteopatía se abona por sesión individual ($60.000 aprox.), mientras que la kinesiología ronda entre $25.000 y $30.000, "
-    "y la enfermería entre $10.000 y $20.000 según la prestación. "
-    "Si el usuario es paciente, destacá los beneficios de recibir atención en casa: comodidad, confianza y continuidad del tratamiento. "
-    "Si el usuario es profesional, explicá los requisitos: matrícula provincial y nacional, seguro de mala praxis, monotributo activo, etc. "
-    "Resaltá que REKAR ofrece honorarios competitivos, formación, soporte constante y asignación de pacientes por cercanía. "
-    "Si el usuario es una obra social o institución, mostralé seguridad y ofrecé soluciones: coordinación de prestaciones, control de insumos, informes y seguimiento clínico. "
-    "Las urgencias médicas no son parte de nuestro servicio: indicá siempre comunicarse con el 107, SAME o su cobertura médica. "
-    "Los cuidadores acompañan y asisten, pero no realizan prácticas médicas ni kinésicas. "
-    "Si alguien es irrespetuoso o usa malas palabras, respondé con calma y cortá la conversación educadamente. "
-    "Si no sabés algo, indicá que puede escribir a rekar.salud@gmail.com o elegir la opción 6 del menú para hablar con un representante. "
-    "Finalizá siempre tus respuestas recordando: ‘Si querés volver al menú principal, escribí M. Para salir, S.’"
-)
+    try:
+        url = f"{GEMINI_URL}?key={GEMINI_API_KEY}"
+        headers = {"Content-Type": "application/json"}
 
-faq = {
-    "precio": (
-        "💰 En REKAR organizamos los tratamientos por paquetes de sesiones (10 o 20), "
-        "ya que creemos que la recuperación es un proceso continuo y no una sesión aislada. "
-        "Kinesiología cuesta entre $25.000 y $30.000 por sesión (con descuento por paquete). "
-        "Osteopatía $60.000, y enfermería entre $10.000 y $20.000 según la prestación. "
-        "Los pagos pueden realizarse por transferencia o plan mensual."
-    ),
-    "zona": (
-        "📍 Atendemos actualmente en Gran Buenos Aires – Zonas Sur, Oeste y Norte. "
-        "Siempre buscamos que el profesional esté cerca del domicilio del paciente, "
-        "para garantizar continuidad y comodidad."
-    ),
-    "obras sociales": (
-        "🏥 No trabajamos con obras sociales directamente, pero sí realizamos servicios "
-        "para obras sociales que nos contratan y derivan pacientes a nuestra red de profesionales."
-    )
-}
+        system_hint = (
+            "Sos *RekyBot IA 1.5.2*, el asistente oficial de *REKAR – Red de Enfermería y Kinesiología Argentina*. "
+            "Tu misión es representar a REKAR con calidez, claridad y profesionalismo. "
+            "Tu estilo debe ser humano, empático y confiable, reflejando siempre nuestro lema: "
+            "‘Cuidamos con compromiso, sanamos con empatía’. "
+            "Debés transmitir cercanía, tranquilidad y conocimiento técnico, hablando de manera sencilla, sin tecnicismos innecesarios. "
+            "En REKAR brindamos atención domiciliaria de kinesiología y enfermería, priorizando la calidad humana y la formación continua. "
+            "Nuestro objetivo es acompañar tanto al paciente como a su familia, en un proceso de recuperación seguro y digno dentro del hogar. "
+            "Atendemos de lunes a sábado, de 9 a 19 hs, en Zona Sur, Zona Oeste y Zona Norte del GBA. "
+            "Las sesiones se organizan por paquetes (10 o 20) o mensualmente, buscando la mejor relación costo-calidad. "
+            "La osteopatía se abona por sesión individual ($60.000 aprox.), mientras que la kinesiología ronda entre $25.000 y $30.000, "
+            "y la enfermería entre $10.000 y $20.000 según la prestación. "
+            "Si el usuario es paciente, destacá los beneficios de recibir atención en casa: comodidad, confianza y continuidad del tratamiento. "
+            "Si el usuario es profesional, explicá los requisitos: matrícula provincial y nacional, seguro de mala praxis, monotributo activo, etc. "
+            "Resaltá que REKAR ofrece honorarios competitivos, formación, soporte constante y asignación de pacientes por cercanía. "
+            "Si el usuario es una obra social o institución, mostralé seguridad y ofrecé soluciones: coordinación de prestaciones, control de insumos, informes y seguimiento clínico. "
+            "Las urgencias médicas no son parte de nuestro servicio: indicá siempre comunicarse con el 107, SAME o su cobertura médica. "
+            "Los cuidadores acompañan y asisten, pero no realizan prácticas médicas ni kinésicas. "
+            "Si alguien es irrespetuoso o usa malas palabras, respondé con calma y cortá la conversación educadamente. "
+            "Si no sabés algo, indicá que puede escribir a rekar.salud@gmail.com o elegir la opción 6 del menú para hablar con un representante. "
+            "Finalizá siempre tus respuestas recordando: ‘Si querés volver al menú principal, escribí M. Para salir, S.’"
+        )
 
-    
-        
+        faq = {
+            "precio": (
+                "💰 En REKAR organizamos los tratamientos por paquetes de sesiones (10 o 20), "
+                "ya que creemos que la recuperación es un proceso continuo y no una sesión aislada. "
+                "Kinesiología cuesta entre $25.000 y $30.000 por sesión (con descuento por paquete). "
+                "Osteopatía $60.000, y enfermería entre $10.000 y $20.000 según la prestación. "
+                "Los pagos pueden realizarse por transferencia o plan mensual."
+            ),
+            "zona": (
+                "📍 Atendemos actualmente en Gran Buenos Aires – Zonas Sur, Oeste y Norte. "
+                "Siempre buscamos que el profesional esté cerca del domicilio del paciente, "
+                "para garantizar continuidad y comodidad."
+            ),
+            "obras sociales": (
+                "🏥 No trabajamos con obras sociales directamente, pero sí realizamos servicios "
+                "para obras sociales que nos contratan y derivan pacientes a nuestra red de profesionales."
+            )
+        }
+
         parts = []
         if context_hint:
             parts.append({"text": context_hint})
         parts.append({"text": prompt})
+
         body = {
             "contents": [{"parts": parts}],
             "systemInstruction": {"role": "system", "parts": [{"text": system_hint}]}
         }
-        r = requests.post(url, headers={"Content-Type": "application/json"}, json=body, timeout=10)
+
+        r = requests.post(url, headers=headers, json=body, timeout=10)
         if r.status_code != 200:
-            # log a Telegram para diagnosticar
             try:
                 send_telegram_message(f"⚠️ Gemini respondió {r.status_code}. Error: {r.text[:700]}")
             except:
                 pass
             return None
+
         data = r.json()
         candidates = data.get("candidates", [])
         if not candidates:
             return None
+
         parts_out = candidates[0].get("content", {}).get("parts", [])
         if not parts_out:
             return None
+
         return parts_out[0].get("text", "").strip()
+
     except Exception as e:
         send_telegram_message(f"⚠️ Error llamando a Gemini: {e}")
         return None
@@ -195,13 +196,11 @@ def webhook():
         phone = msg["from"]
         text = msg.get("text", {}).get("body", "").strip()
 
-        # Evita eco/duplicado
         if is_duplicate(phone, text):
             return jsonify({"ok": True}), 200
 
         info = sessions.get(phone, {"state": "start", "time": time.time(), "human_notified": False})
 
-        # Comandos universales
         if text.lower() in ["m", "menu"]:
             info["state"] = "menu"
             sessions[phone] = info
@@ -213,19 +212,17 @@ def webhook():
             clear_session(phone)
             return jsonify({"ok": True}), 200
 
-        # === ESTADOS ===
         if info["state"] == "start":
             send_whatsapp_text(phone, get_greeting())
             info["state"] = "awaiting_name"
             sessions[phone] = info
             return jsonify({"ok": True}), 200
 
-        elif info["state"] == "awaiting_name":
+        elif info["state"] == "awaiting_name"]:
             name = text.split(" ")[0].capitalize()
             info["name"] = name
             info["state"] = "menu"
             sessions[phone] = info
-            # (acá podrías guardar a Sheets si querés)
             send_whatsapp_text(phone, main_menu(name))
             return jsonify({"ok": True}), 200
 
@@ -242,7 +239,6 @@ def webhook():
             elif choice == "5":
                 send_whatsapp_text(phone, "🏥 REKAR brinda servicios domiciliarios de kinesiología y enfermería en CABA y GBA.")
             elif choice == "6":
-                # activar modo humano (silencio del bot)
                 if not info.get("human_notified"):
                     send_whatsapp_text(phone, "🧑‍💼 Un representante fue notificado. Te contactará a la brevedad.")
                     send_telegram_message(f"📞 Nuevo cliente quiere hablar con un representante:\n{info.get('name','Cliente')} (+{phone})")
@@ -264,7 +260,6 @@ def webhook():
             return jsonify({"ok": True}), 200
 
         elif info["state"] == "human_mode":
-            # Silencio del bot: solo forward a Telegram
             elapsed = time.time() - info.get("time", 0)
             if elapsed > HUMAN_TTL:
                 info["state"] = "menu"
@@ -276,15 +271,12 @@ def webhook():
             return jsonify({"ok": True}), 200
 
         elif info["state"] == "assistant_mode":
-            # Mensaje “procesando”
             send_whatsapp_text(phone, "⏳ Procesando tu pregunta...")
-            # Pregunta a Gemini (con timeout y fallback)
             answer = ask_gemini(text, context_hint=f"Cliente: {info.get('name','')}, teléfono: +{phone}")
             if answer:
                 answer = (answer.strip() + "\n\n🗂️ Si querés volver al *menú*, escribí M. Para *salir*, S.")
                 send_whatsapp_text(phone, answer)
             else:
-                # Fallback híbrido
                 fallback = (
                     "🤖 Nuestra IA está un poco ocupada, pero te ayudo igual. "
                     "Podés preguntarme sobre nuestros *servicios*, *zonas* (CABA y GBA) o *cómo sumarte al equipo*. \n"
@@ -300,7 +292,7 @@ def webhook():
     return jsonify({"ok": True}), 200
 
 # ==============================================
-# WEBHOOK TELEGRAM (responder -> WhatsApp)
+# TELEGRAM WEBHOOK
 # ==============================================
 
 @app.route("/telegram", methods=["POST"])
@@ -312,12 +304,10 @@ def telegram_webhook():
     msg = data["message"]
     chat_id = str(msg["chat"]["id"])
     if chat_id != TELEGRAM_CHAT_ID:
-        # ignorar otros chats
         return jsonify({"ok": True}), 200
 
     text = msg.get("text", "").strip()
 
-    # /cerrar <numero>
     if text.startswith("/cerrar"):
         try:
             _, phone = text.split(" ", 1)
@@ -327,7 +317,6 @@ def telegram_webhook():
             send_telegram_message("❌ Usa: /cerrar <número>")
         return jsonify({"ok": True}), 200
 
-    # /enviar <numero> <mensaje>  (queda por compatibilidad)
     if text.startswith("/enviar"):
         try:
             _, phone, payload = text.split(" ", 2)
@@ -336,10 +325,8 @@ def telegram_webhook():
             send_telegram_message("❌ Formato: /enviar <número> <mensaje>")
         return jsonify({"ok": True}), 200
 
-    # Si el mensaje de Telegram es RESPUESTA a un mensaje reenviado, extraemos el número
     if "reply_to_message" in msg:
         original = msg["reply_to_message"].get("text", "")
-        # El formato que reenviamos es: "💬 Nombre (+549...) : contenido"
         phone = None
         if "(" in original and ")" in original and "+" in original:
             try:
@@ -349,7 +336,6 @@ def telegram_webhook():
         if phone:
             send_whatsapp_text(phone, text)
             send_telegram_message(f"✅ Enviado a +{phone}", reply_to=msg["message_id"])
-            # Mantener modo humano activo mientras se conversa
             info = sessions.get(phone, {"state": "human_mode", "time": time.time(), "human_notified": True})
             info["state"] = "human_mode"
             info["time"] = time.time()
@@ -360,7 +346,7 @@ def telegram_webhook():
     return jsonify({"ok": True}), 200
 
 # ==============================================
-# RUN
+# RUN SERVER
 # ==============================================
 
 if __name__ == "__main__":
