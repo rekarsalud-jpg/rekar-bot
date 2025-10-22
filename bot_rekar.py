@@ -208,7 +208,7 @@ def ask_gemini(prompt, context_hint=""):
     if not GEMINI_API_KEY:
         return None
     try:
-        url = f"{GEMINI_URL}/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        url = f"{GEMINI_URL}/v1/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
         headers = {"Content-Type": "application/json"}
         system_hint = (
             "Sos el asistente de REKAR. Respondé breve, amable y claro. "
@@ -462,3 +462,4 @@ def health():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
+
