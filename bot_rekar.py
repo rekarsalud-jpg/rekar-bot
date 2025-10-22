@@ -1,58 +1,40 @@
-
 # ==========================================
-# 🤖 REKYBOT v1.5.1 – WhatsApp + Telegram + Gemini + Sheets (estable)
+# 🤖 REKYBOT 1.5.2 – estable (Render)
+# - Fijo: "M" vuelve al menú en cualquier estado
+# - Fijo: integración Gemini (v1beta) con timeout + fallback híbrido
+# - Silencio en modo HUMANO hasta /cerrar o TTL
 # ==========================================
 
-import os, time, json, re
-import requests
+import os, time, requests
 from flask import Flask, request, jsonify
-
-# === Google Sheets (opcional) ===
-USE_SHEETS = False
-try:
-    import gspread
-    from oauth2client.service_account import ServiceAccountCredentials
-    USE_SHEETS = True
-except Exception:
-    USE_SHEETS = False
 
 app = Flask(__name__)
 
-# === VARIABLES DE ENTORNO ===
-ACCESS_TOKEN = os.getenv("ACCESS_TOKEN", "")
-PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "")
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-FORM_URL = os.getenv("FORM_URL", "https://forms.gle/tu-formulario")
-EMAIL_DESTINATION = os.getenv("EMAIL_DESTINATION", "rekar.salud@gmail.com") # solo texto en opciones
+# === ENV VARS (Render) ===
+ACCESS_TOKEN     = os.getenv("ACCESS_TOKEN")
+PHONE_NUMBER_ID  = os.getenv("PHONE_NUMBER_ID")
+VERIFY_TOKEN     = os.getenv("VERIFY_TOKEN")
 
-# Gemini
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_URL = os.getenv("GEMINI_URL", "https://generativelanguage.googleapis.com")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-latest")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 
-# Google Sheets (opcional)
-GSHEETS_CREDENTIALS_FILE = os.getenv("GSHEETS_CREDENTIALS_FILE", "") # JSON del service account (contenido)
-GSHEETS_SHEET_NAME = os.getenv("GSHEETS_SHEET_NAME", "Contactos") # nombre de la hoja
+# Gemini: usa exactamente estos nombres en Render
+GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY", "")
+GEMINI_URL      = os.getenv(
+    "GEMINI_URL",
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
+)
 
-# === VARIABLES INTERNAS ===
-sessions = {} # {phone: {"state":..., "name":..., "time":..., "human_since":...}}
-last_user_text = {} # anti-duplicado por texto
-HUMAN_TTL = 60 * 60 # 60 min
-GREETING_VERSION = "1.5.1"
+# === Estado en memoria ===
+sessions       = {}     # {phone: {"state":..., "name":..., "time":...}}
+active_human   = {}     # {phone: last_ts}
+last_user_text = {}     # anti-eco
+HUMAN_TTL      = 60*60  # 60 min
 
-# ======= HELPERS =======
-
-def now():
-    return int(time.time())
-
-def send_whatsapp_text(phone, text):
-    """Envia texto a WhatsApp API."""
-    if not (ACCESS_TOKEN and PHONE_NUMBER_ID):
-        print("❌ Falta ACCESS_TOKEN o PHONE_NUMBER_ID")
-        return False
-
+# -------------------------------------------------
+# Utilidades WhatsApp / Telegram
+# -------------------------------------------------
+def send_whatsapp(phone, text):
     url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
@@ -65,401 +47,257 @@ def send_whatsapp_text(phone, text):
         "text": {"body": text}
     }
     try:
-        r = requests.post(url, headers=headers, json=data, timeout=20)
-        ok = (r.status_code == 200)
-        if not ok:
-            print("❌ WhatsApp error:", r.text)
-        return ok
-    except Exception as e:
-        print("⚠️ Excepción WhatsApp:", e)
+        r = requests.post(url, headers=headers, json=data)
+        if r.status_code == 200:
+            last_user_text[phone] = text
+            return True
+        print("WA error:", r.text)
         return False
+    except Exception as e:
+        print("WA ex:", e); return False
 
-def send_telegram(text, reply_to_message_id=None):
-    """Envía un mensaje al grupo de Telegram."""
-    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
-        return
+def send_telegram(text, reply_to=None):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
-    if reply_to_message_id:
-        payload["reply_to_message_id"] = reply_to_message_id
-    try:
-        requests.post(url, json=payload, timeout=15)
-    except Exception as e:
-        print("⚠️ Excepción Telegram:", e)
+    payload = {"chat_id": str(TELEGRAM_CHAT_ID), "text": text}
+    if reply_to: payload["reply_to_message_id"] = reply_to
+    try: requests.post(url, json=payload, timeout=6)
+    except Exception as e: print("TG ex:", e)
 
-def parse_phone_from_telegram_message(text):
-    """
-    Extrae +549... o 549... o 11... entre paréntesis si viene de un mensaje re-enviado.
-    Ej: "Rodrigo (+5491168543959): Hola" -> +5491168543959
-    """
-    # Busca (+549...) o (549...) dentro del texto
-    m = re.search(r"\((\+?\d{6,20})\)", text)
-    if m:
-        return m.group(1)
-    # como fallback, intenta detectar un número suelto largo
-    m2 = re.search(r"(\+?\d{10,20})", text)
-    if m2:
-        return m2.group(1)
-    return None
-
-# ======= MENSAJES =======
-
-def greeting():
-    return (
-        f"👋 ¡Hola! Soy 🤖 *RekyBot {GREETING_VERSION}*, asistente virtual de *REKAR*. 😊\n"
-        "Atendemos de *lunes a sábado de 9 a 19 hs.*\n\n"
-        "¿Cómo es tu *nombre*?"
-    )
-
-def menu_for(name):
-    n = name or "¡genial!"
-    return (
-        f"¡Genial, {n}! ✨\n"
-        "Elegí una opción:\n\n"
-        f"1️⃣ Enviar tu CV ({EMAIL_DESTINATION})\n"
-        "2️⃣ Requisitos para trabajar en REKAR\n"
-        "3️⃣ Ingresar a la web institucional\n"
-        "4️⃣ Completar formulario de base de datos\n"
-        "5️⃣ Información sobre REKAR\n"
-        "6️⃣ Hablar con un representante de REKAR\n"
-        "7️⃣ Seguir chateando con RekyBot (modo asistente IA)\n"
-        "8️⃣ Salir ❌\n\n"
-        "Si querés volver al *menú*, escribí *M*.\n"
-        "Para *salir*, escribí *S*."
-    )
-
-def info_requisitos():
-    return (
-        "✅ *Requisitos para trabajar en REKAR:*\n"
-        "• Título y matrícula habilitante (según profesión).\n"
-        "• DNI y CBU.\n"
-        "• Seguro/ART o voluntad de gestionarlo con nosotros.\n"
-        "• Disponibilidad horaria (guardias/visitas a acordar).\n"
-        "• Buena comunicación y trato con pacientes/familias."
-    )
-
-def info_empresa():
-    return (
-        "🏥 *Sobre REKAR*\n"
-        "Brindamos *servicios domiciliarios* de *kinesiología* y *enfermería* en *CABA* y *GBA*.\n"
-        "• Prestaciones planificadas y guardias de enfermería.\n"
-        "• Atención particular y convenios con obras sociales.\n"
-        "• Equipo humano con foco en la calidad y el respeto."
-    )
-
-def after_human_ack():
-    return "🕐 Gracias por tu mensaje. Nuestro representante ya fue notificado y te responderá a la brevedad."
-
-def bye_msg():
-    return "¡Gracias por contactarte con *REKAR*! 👋 Cuando necesites, escribinos de nuevo."
-
-# ======= GOOGLE SHEETS =======
-
-def sheets_client():
-    """Devuelve cliente de gspread si hay credenciales en env (contenido JSON)."""
-    if not (USE_SHEETS and GSHEETS_CREDENTIALS_FILE):
+# -------------------------------------------------
+# Gemini (timeout + payload correcto v1beta)
+# -------------------------------------------------
+def ask_gemini(prompt):
+    """Devuelve texto o None (para fallback). Timeout 10s."""
+    if not GEMINI_API_KEY or not GEMINI_URL:
         return None
     try:
-        creds_json = json.loads(GSHEETS_CREDENTIALS_FILE)
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
-        gc = gspread.authorize(creds)
-        return gc
-    except Exception as e:
-        print("⚠️ Sheets no disponible:", e)
-        return None
-
-def save_contact_to_sheet(phone, name):
-    gc = sheets_client()
-    if not gc:
-        return
-    try:
-        sh = None
-        # abre por nombre de spreadsheet igual a "Contactos_REKAR" (o crea)
-        title = "Contactos_REKAR"
-        try:
-            sh = gc.open(title)
-        except Exception:
-            sh = gc.create(title)
-        try:
-            ws = sh.worksheet(GSHEETS_SHEET_NAME)
-        except Exception:
-            ws = sh.add_worksheet(GSHEETS_SHEET_NAME, rows=1000, cols=6)
-            ws.update("A1:D1", [["FechaUnix", "Telefono", "Nombre", "Fuente"]])
-        # busca si ya existe el teléfono
-        rows = ws.get_all_records()
-        exists_row = next((r for r in rows if str(r.get("Telefono", "")) == str(phone)), None)
-        if exists_row:
-            # actualizar nombre
-            idx = rows.index(exists_row) + 2
-            ws.update_cell(idx, 3, name)
-        else:
-            ws.append_row([now(), str(phone), name, "WhatsApp"])
-        print("✅ Guardado en Google Sheets")
-    except Exception as e:
-        print("⚠️ Error guardando en Sheets:", e)
-
-# ======= GEMINI =======
-
-def ask_gemini(prompt, context_hint=""):
-    """
-    Llama a Gemini 1.5 Flash (latest).
-    Fallback: devuelve None si hay error para que el flujo responda modo "híbrido".
-    """
-    if not GEMINI_API_KEY:
-        return None
-    try:
-        url = f"{GEMINI_URL}/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-        headers = {"Content-Type": "application/json"}
-        system_hint = (
-            "Sos el asistente de REKAR. Respondé breve, amable y claro. "
-            "Si preguntan por precios, horarios o zonas, respondé con la info conocida: "
-            "horario 9 a 19 hs, zonas CABA y GBA, servicios de kinesiología y enfermería. "
-            "Si falta info exacta, sugerí 'te puede contactar un representante (opción 6)'."
+        data = {"contents": [{"parts": [{"text": prompt}]}]}
+        r = requests.post(
+            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+            headers={"Content-Type": "application/json"},
+            json=data,
+            timeout=10
         )
-        parts = []
-        if context_hint:
-            parts.append({"text": context_hint})
-        parts.append({"text": prompt})
-        body = {"contents": [{"parts": parts}],
-                "safetySettings": [
-                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-                ],
-                "generationConfig": {"temperature": 0.4, "maxOutputTokens": 256}
-        }
-        # prepend system hint vía "system_instruction" (nuevo formato beta)
-        body["systemInstruction"] = {"parts": [{"text": system_hint}]}
-
-        r = requests.post(url, headers=headers, json=body, timeout=25)
         if r.status_code != 200:
-            send_telegram(f"⚠️ Gemini respondió con código {r.status_code}. Error: {r.text[:500]}")
+            send_telegram(f"⚠️ Gemini respondió con código {r.status_code}.")
             return None
-        data = r.json()
-        # navega candidates->content->parts->text
-        candidates = data.get("candidates", [])
-        if not candidates:
-            return None
-        content = candidates[0].get("content", {})
-        parts = content.get("parts", [])
-        if not parts:
-            return None
+        js = r.json()
+        cand = js.get("candidates", [])
+        if not cand: return None
+        parts = cand[0].get("content", {}).get("parts", [])
+        if not parts: return None
         return parts[0].get("text", "").strip()
+    except requests.Timeout:
+        send_telegram("⏳ Timeout consultando a Gemini (10s).")
+        return None
     except Exception as e:
         send_telegram(f"⚠️ Error llamando a Gemini: {e}")
         return None
 
-# ======= CONTROL DE SESIÓN =======
+# -------------------------------------------------
+# Mensajes base
+# -------------------------------------------------
+def greeting():
+    return ("👋 ¡Hola! Soy 🤖 *RekyBot 1.5.2*, asistente virtual de *REKAR*.\n"
+            "Atendemos de *lunes a sábado de 9 a 19 hs.*\n\n"
+            "¿Cómo es tu nombre?")
 
+def menu(name):
+    return (f"¡Genial, {name}! ✨\nElegí una opción:\n\n"
+            "1️⃣ Enviar tu CV (rekar.salud@gmail.com)\n"
+            "2️⃣ Requisitos para trabajar en REKAR\n"
+            "3️⃣ Ingresar a la web institucional\n"
+            "4️⃣ Completar formulario de base de datos\n"
+            "5️⃣ Información sobre REKAR\n"
+            "6️⃣ Hablar con un representante\n"
+            "7️⃣ Seguir chateando con RekyBot (modo asistente IA)\n"
+            "8️⃣ Salir ❌\n\n"
+            "Si querés volver al *menú*, escribí *M*. Para *salir*, escribí *S*.")
+
+# -------------------------------------------------
+# Helpers de sesión
+# -------------------------------------------------
 def clear_session(phone):
     sessions.pop(phone, None)
+    active_human.pop(phone, None)
     last_user_text.pop(phone, None)
-    print(f"🧹 Sesión cerrada para {phone}")
+    print(f"🧹 sesión cerrada {phone}")
 
 def ensure_session(phone):
     if phone not in sessions:
-        sessions[phone] = {"state": "start", "time": now(), "name": ""}
-    return sessions[phone]
+        sessions[phone] = {"state":"start","time":time.time()}
 
-def is_duplicate(phone, text):
-    prev = last_user_text.get(phone)
-    if prev and prev.strip() == text.strip():
-        return True
-    last_user_text[phone] = text
-    return False
+def is_duplicate_in(phone, incoming_text):
+    last = last_user_text.get(phone)
+    return last and last.strip() == incoming_text.strip()
 
-# ======= WEBHOOK WHATSAPP =======
-
-@app.route("/webhook", methods=["GET", "POST"])
-def webhook():
+# -------------------------------------------------
+# Webhook WhatsApp
+# -------------------------------------------------
+@app.route("/webhook", methods=["GET","POST"])
+def whatsapp_webhook():
     if request.method == "GET":
         if request.args.get("hub.verify_token") == VERIFY_TOKEN:
-            return request.args.get("hub.challenge", "")
-        return "Invalid token", 403
+            return request.args.get("hub.challenge")
+        return "Token inválido", 403
 
     data = request.get_json(silent=True) or {}
     try:
-        changes = data["entry"][0]["changes"][0]["value"]
-        if "messages" not in changes:
-            return jsonify({"ok": True}), 200
+        msg = data["entry"][0]["changes"][0]["value"]["messages"][0]
+        phone = msg["from"]
+        text  = msg.get("text",{}).get("body","").strip()
+    except Exception:
+        return jsonify({"ok":True}), 200
 
-        msg = changes["messages"][0]
-        phone = msg.get("from")
-        text = msg.get("text", {}).get("body", "").strip()
+    ensure_session(phone)
+    state = sessions[phone]["state"]
 
-        if not phone:
-            return jsonify({"ok": True}), 200
+    # Silencio total si está en humano y dentro de TTL
+    if state == "human" and (time.time() - sessions[phone]["time"] < HUMAN_TTL):
+        # reenviamos a Telegram lo que dice el cliente
+        send_telegram(f"💬 {sessions[phone].get('name','Cliente')} (+{phone}): {text}")
+        # Notificamos al cliente que un representante contestará
+        send_whatsapp(phone, "🕐 Gracias por tu mensaje. Un representante te responderá pronto.")
+        return jsonify({"ok":True}), 200
+    elif state == "human":
+        # expiró la ventana
+        sessions[phone]["state"] = "menu"
+        send_whatsapp(phone, "⏳ La conversación con el representante finalizó.")
+        send_whatsapp(phone, menu(sessions[phone].get("name","Cliente")))
+        return jsonify({"ok":True}), 200
 
-        # Anti eco / duplicado
-        if text and is_duplicate(phone, text):
-            return jsonify({"ok": True}), 200
+    # Comandos globales (funcionan SIEMPRE)
+    if text.lower() in ["s","salir","exit"]:
+        send_whatsapp(phone, "¡Gracias por contactarte con REKAR! 👋 Cuando necesites, escribinos de nuevo.")
+        clear_session(phone)
+        return jsonify({"ok":True}), 200
 
-        info = ensure_session(phone)
+    if text.lower() in ["m","menu"]:
+        name = sessions[phone].get("name","Cliente")
+        sessions[phone]["state"] = "menu"
+        send_whatsapp(phone, menu(name))
+        return jsonify({"ok":True}), 200
 
-        # Comandos globales
-        if text.lower() in ["s", "salir"]:
-            send_whatsapp_text(phone, bye_msg())
+    # Bloque anti-eco
+    if is_duplicate_in(phone, text):
+        return jsonify({"ok":True}), 200
+
+    # ----- Estados -----
+    if state == "start":
+        send_whatsapp(phone, greeting())
+        sessions[phone]["state"] = "awaiting_name"
+        return jsonify({"ok":True}), 200
+
+    if state == "awaiting_name":
+        name = text.split(" ")[0].capitalize() if text else "Cliente"
+        sessions[phone]["name"] = name
+        sessions[phone]["state"] = "menu"
+        send_whatsapp(phone, menu(name))
+        return jsonify({"ok":True}), 200
+
+    if state == "menu":
+        ch = text.lower()
+        if ch == "1":
+            send_whatsapp(phone, "📧 Enviá tu CV a *rekar.salud@gmail.com*. ¡Gracias por postularte! 🙌")
+        elif ch == "2":
+            send_whatsapp(phone, "✅ Requisitos: título habilitante, matrícula vigente y disponibilidad horaria.")
+        elif ch == "3":
+            send_whatsapp(phone, "🌐 Visitá nuestra web: https://rekarsalud.blogspot.com/?m=1")
+        elif ch == "4":
+            send_whatsapp(phone, "🗂️ Completá el formulario (base de datos): [agregar enlace Google Form]")
+        elif ch == "5":
+            send_whatsapp(phone, "🏥 REKAR brinda kinesiología y enfermería domiciliaria en CABA y GBA.")
+        elif ch == "6":
+            send_whatsapp(phone, "📞 Un representante fue notificado. Te contactará a la brevedad.")
+            send_telegram(f"📞 Nuevo cliente quiere hablar con un representante:\n{sessions[phone].get('name','Cliente')} (+{phone})")
+            sessions[phone]["state"] = "human"
+            sessions[phone]["time"]  = time.time()
+        elif ch == "7":
+            sessions[phone]["state"] = "ia"
+            send_whatsapp(phone, "💬 Estás en *modo IA*. Escribí tu consulta (puede demorar hasta 10 s).")
+        elif ch == "8":
+            send_whatsapp(phone, "¡Gracias por contactarte con REKAR! 👋 Que tengas un excelente día.")
             clear_session(phone)
-            return jsonify({"ok": True}), 200
+        else:
+            send_whatsapp(phone, "No entendí. Escribí el *número* de la opción, *M* para menú o *S* para salir.")
+        return jsonify({"ok":True}), 200
 
-        if text.lower() in ["m", "menu"]:
-            info["state"] = "menu"
-            send_whatsapp_text(phone, menu_for(info.get("name", "")))
-            return jsonify({"ok": True}), 200
+    if state == "ia":
+        # Indicador de procesamiento + llamada a Gemini con timeout
+        send_whatsapp(phone, "⏳ Procesando tu pregunta...")
+        answer = ask_gemini(text)
 
-        # Estados
-        if info["state"] == "start":
-            send_whatsapp_text(phone, greeting())
-            info["state"] = "awaiting_name"
-            return jsonify({"ok": True}), 200
+        if not answer:
+            # Fallback híbrido + deja seguir en IA o volver
+            send_whatsapp(
+                phone,
+                "🤖 No pude conectarme a la IA. "
+                "Podés intentar de nuevo, escribir *M* para volver al menú o *S* para salir."
+            )
+        else:
+            send_whatsapp(phone, answer)
+        return jsonify({"ok":True}), 200
 
-        elif info["state"] == "awaiting_name":
-            name = text.split(" ")[0].strip().title() if text else "Cliente"
-            info["name"] = name
-            send_whatsapp_text(phone, menu_for(name))
-            # guardar en sheet (opcional)
-            try:
-                save_contact_to_sheet(phone, name)
-            except Exception as e:
-                print("Sheets skip:", e)
-            info["state"] = "menu"
-            return jsonify({"ok": True}), 200
+    # Si cae en un estado no esperado: volvemos al menú
+    sessions[phone]["state"] = "menu"
+    send_whatsapp(phone, menu(sessions[phone].get("name","Cliente")))
+    return jsonify({"ok":True}), 200
 
-        elif info["state"] == "menu":
-            ch = text.strip()
-            if ch == "1":
-                send_whatsapp_text(phone, f"📧 Enviá tu CV a: {EMAIL_DESTINATION}\n¡Gracias por postularte! 🙌")
-            elif ch == "2":
-                send_whatsapp_text(phone, info_requisitos())
-            elif ch == "3":
-                send_whatsapp_text(phone, "🌐 Visitá nuestra web: https://rekarsalud.blogspot.com/?m=1")
-            elif ch == "4":
-                send_whatsapp_text(phone, f"🗂️ Completá el formulario: {FORM_URL}")
-            elif ch == "5":
-                send_whatsapp_text(phone, info_empresa())
-            elif ch == "6":
-                # activar modo humano (silenciar bot y reenviar a Telegram)
-                info["state"] = "human_mode"
-                info["human_since"] = now()
-                send_whatsapp_text(phone, "📞 *Listo.* Un representante fue notificado. Te responderá por este chat.")
-                send_telegram(f"📞 Nuevo cliente quiere hablar con un representante:\n{info.get('name','Cliente')} (+{phone})")
-            elif ch == "7":
-                info["state"] = "assistant_mode"
-                info["assistant_since"] = now()
-                send_whatsapp_text(phone, "💬 Ahora estás chateando con *RekyBot Asistente*. Podés hacerme preguntas sobre nuestros servicios.")
-            elif ch == "8":
-                send_whatsapp_text(phone, bye_msg())
-                clear_session(phone)
-            else:
-                send_whatsapp_text(phone, "No entendí. Indicá el *número* de la opción, *M* para menú o *S* para salir.")
-            return jsonify({"ok": True}), 200
-
-        elif info["state"] == "human_mode":
-            # si está dentro del TTL, NO contestamos; solo reenviamos a Telegram
-            if now() - info.get("human_since", 0) < HUMAN_TTL:
-                send_telegram(f"💬 {info.get('name','Cliente')} (+{phone}): {text}")
-                # Respuesta mínima automática para que el cliente sepa que está en cola
-                send_whatsapp_text(phone, after_human_ack())
-            else:
-                # expiró conversación, volvemos al menú
-                info["state"] = "menu"
-                send_whatsapp_text(phone, "⏳ La conversación anterior finalizó por inactividad. Volvemos al menú.")
-                send_whatsapp_text(phone, menu_for(info.get("name","")))
-            return jsonify({"ok": True}), 200
-
-        elif info["state"] == "assistant_mode":
-            # Primero intentamos Gemini
-            ctx = "Empresa REKAR: kinesiología y enfermería domiciliaria en CABA y GBA. Horario 9-19 hs."
-            answer = ask_gemini(text, context_hint=ctx)
-            if not answer:
-                # Fallback híbrido simple
-                low = text.lower()
-                if any(k in low for k in ["zona", "dónde", "caba", "gba", "burzaco", "adrogué"]):
-                    answer = "Trabajamos en CABA y GBA. Contanos tu barrio y te confirmamos."
-                elif "precio" in low or "cuánto" in low or "pagan" in low:
-                    answer = "Los costos varían según la prestación. Si querés, un representante te asesora (opción 6)."
-                elif "horario" in low or "atienden" in low:
-                    answer = "Nuestro horario de atención es de lunes a sábado de 9 a 19 hs."
-                elif "cv" in low or "postular" in low:
-                    answer = f"Podés enviar tu CV a {EMAIL_DESTINATION} o completar el formulario (opción 4)."
-                else:
-                    answer = "Gracias por tu consulta. Si querés info precisa, podés hablar con un representante (opción 6)."
-
-            send_whatsapp_text(phone, answer + "\n\nEscribí *M* para volver al menú o *S* para salir.")
-            return jsonify({"ok": True}), 200
-
-    except Exception as e:
-        print("⚠️ Error webhook WA:", e)
-        return jsonify({"ok": True}), 200
-
-    return jsonify({"ok": True}), 200
-
-# ======= WEBHOOK TELEGRAM (responder directo y comandos) =======
-
+# -------------------------------------------------
+# Webhook Telegram (responder a WA + cerrar sesión)
+# -------------------------------------------------
 @app.route("/telegram", methods=["POST"])
 def telegram_webhook():
     data = request.get_json(silent=True) or {}
-    msg = data.get("message", {})
-    if not msg:
-        return jsonify({"ok": True}), 200
+    msg  = data.get("message", {})
+    if not msg: return jsonify({"ok":True}), 200
 
-    chat_id = str(msg.get("chat", {}).get("id", ""))
-    if TELEGRAM_CHAT_ID and chat_id != str(TELEGRAM_CHAT_ID):
-        # Ignora otros chats
-        return jsonify({"ok": True}), 200
+    chat_id = str(msg.get("chat",{}).get("id",""))
+    if chat_id != str(TELEGRAM_CHAT_ID):
+        return jsonify({"ok":True}), 200
 
-    text = (msg.get("text") or "").strip()
-    reply = msg.get("reply_to_message")
+    text    = msg.get("text","").strip()
+    reply   = msg.get("reply_to_message")
+    # Si responde a un mensaje reenviado por el bot, extraemos el número del texto "(+....)"
+    if reply and reply.get("text"):
+        original = reply["text"]
+        # Buscamos (+549...) entre paréntesis
+        if "(" in original and ")" in original:
+            phone = original.split("(")[1].split(")")[0].replace("+","").strip()
+            if text.startswith("/cerrar"):
+                clear_session(phone)
+                send_telegram(f"✅ Sesión cerrada para {phone}")
+            else:
+                # Enviar el texto tal cual al cliente
+                send_whatsapp(phone, text)
+                # Bloqueamos respuestas automáticas hasta que cierres:
+                sessions.setdefault(phone, {"state":"human","time":time.time()})
+                sessions[phone]["state"] = "human"
+                sessions[phone]["time"]  = time.time()
+            return jsonify({"ok":True}), 200
 
-    # /cerrar <telefono>
-    if text.startswith("/cerrar"):
-        try:
-            _, phone = text.split(" ", 1)
-            phone = phone.strip()
-            clear_session(phone)
-            send_telegram(f"✅ Sesión cerrada para {phone}")
-            return jsonify({"ok": True}), 200
-        except Exception:
-            send_telegram("❌ Uso: /cerrar <número>")
-            return jsonify({"ok": True}), 200
-
-    # /enviar <telefono> <mensaje>
+    # Comandos manuales
     if text.startswith("/enviar"):
         try:
-            _, rest = text.split(" ", 1)
-            phone, message = rest.split(" ", 1)
-            send_whatsapp_text(phone.strip(), message.strip())
-            return jsonify({"ok": True}), 200
-        except Exception:
-            send_telegram("❌ Formato: /enviar <número> <mensaje>")
-            return jsonify({"ok": True}), 200
-
-    # Responder con “Responder” a un mensaje del bot
-    if reply:
-        original_text = reply.get("text", "")
-        phone = parse_phone_from_telegram_message(original_text)
-        if phone:
-            send_whatsapp_text(phone, text)
-            # mantener estado human_mode vivo si existe
-            info = sessions.get(phone)
-            if info and info.get("state") == "human_mode":
-                info["human_since"] = now()
+            _, phone, message = text.split(" ", 2)
+            send_whatsapp(phone, message)
+            sessions.setdefault(phone, {"state":"human","time":time.time()})
+            sessions[phone]["state"] = "human"
+            sessions[phone]["time"]  = time.time()
+        except:
+            send_telegram("❌ Formato: /enviar <numero> <mensaje>")
+    elif text.startswith("/cerrar"):
+        parts = text.split(" ",1)
+        if len(parts)==2:
+            clear_session(parts[1].strip())
         else:
-            send_telegram("❌ No pude detectar el número en el mensaje citado.")
-        return jsonify({"ok": True}), 200
+            send_telegram("❌ Usa: /cerrar <numero>")
+    return jsonify({"ok":True}), 200
 
-    return jsonify({"ok": True}), 200
-
-# ======= SALUD =======
-
-@app.route("/", methods=["GET"])
-def health():
-    return jsonify({"service": "RekyBot", "version": GREETING_VERSION, "ok": True})
-
-# ======= RUN =======
-
+# -------------------------------------------------
+# Run
+# -------------------------------------------------
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
+    port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
