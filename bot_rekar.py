@@ -218,7 +218,7 @@ def webhook():
             sessions[phone] = info
             return jsonify({"ok": True}), 200
 
-        elif info["state"] == "awaiting_name"]:
+        elif info["state"] == "awaiting_name":
             name = text.split(" ")[0].capitalize()
             info["name"] = name
             info["state"] = "menu"
