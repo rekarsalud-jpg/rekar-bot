@@ -99,98 +99,56 @@ def ask_gemini(prompt, context_hint=""):
     """Llama a Gemini 2.0-flash. Devuelve string o None en error."""
     if not GEMINI_API_KEY:
         return None
-
-    try:
-        url = f"{GEMINI_URL}?key={GEMINI_API_KEY}"
+try:
+    url = f"{GEMINI_URL}?key={GEMINI_API_KEY}"
     headers = {"Content-Type": "application/json"}
 except Exception as e:
     send_telegram_message(f"⚠️ Error inicializando Gemini: {e}")
     return None
+
 system_hint = (
     "Sos *RekyBot IA 1.5.2*, el asistente oficial de *REKAR – Red de Enfermería y Kinesiología Argentina*. "
     "Tu misión es representar a REKAR con calidez, claridad y profesionalismo. "
     "Tu estilo debe ser humano, empático y confiable, reflejando siempre nuestro lema: "
-     "'Cuidamos con compromiso, sanamos con empatía'. "
-     "Debés transmitir cercanía, tranquilidad y conocimiento técnico, hablando de manera sencilla, sin tecnicismos innecesarios. "
-     "En REKAR brindamos atención domiciliaria de kinesiología y enfermería, priorizando la calidad humana y la formación continua. "
-     "Nuestro objetivo es acompañar tanto al paciente como a su familia, en un proceso de recuperación seguro y digno dentro del hogar. "
-     "Atendemos de lunes a sábado, de 9 a 19 hs, en Zona Sur, Zona Oeste y Zona Norte del GBA. "
-     "Las sesiones se organizan por paquetes (10 o 20) o mensualmente, buscando la mejor relación costo-calidad. "
-     "La osteopatía se abona por sesión individual ($60.000 aprox.), mientras que la kinesiología ronda entre $25.000 y $30.000, "
-     "y la enfermería entre $10.000 y $20.000 según la prestación. "
-     "Si el usuario es paciente, destacá los beneficios de recibir atención en casa: comodidad, confianza, continuidad del tratamiento. "
-     "Si el usuario es profesional, explicá los requisitos: matrícula provincial y nacional, seguro de mala praxis, monotributo activo. "
-     "Resaltá que REKAR ofrece honorarios competitivos, formación, soporte constante y asignación de pacientes por cercanía. "
-     "Si el usuario es una obra social o institución, mostrale seguridad y ofrecé soluciones: coordinación de prestaciones, control de insumos y seguimiento digital. "
-     "Las urgencias médicas no son parte de nuestro servicio: indicá siempre comunicarse con el 107, SAME o su cobertura médica. "
-     "Los cuidadores acompañan y asisten, pero no realizan prácticas médicas ni kinésicas. "
-     "Si alguien es irrespetuoso o usa malas palabras, respondé con calma y cortá la conversación educadamente. "
-     "Si no sabés algo, indicá que puede escribir a rekar.salud@gmail.com o elegir la opción 6 del menú para hablar con un representante. "
-     "Finalizá siempre tus respuestas recordando: 🗂 'Si querés volver al menú principal, escribí M. Para salir, S.'"
-    )
+    "‘Cuidamos con compromiso, sanamos con empatía’. "
+    "Debés transmitir cercanía, tranquilidad y conocimiento técnico, hablando de manera sencilla, sin tecnicismos innecesarios. "
+    "En REKAR brindamos atención domiciliaria de kinesiología y enfermería, priorizando la calidad humana y la formación continua. "
+    "Nuestro objetivo es acompañar tanto al paciente como a su familia, en un proceso de recuperación seguro y digno dentro del hogar. "
+    "Atendemos de lunes a sábado, de 9 a 19 hs, en Zona Sur, Zona Oeste y Zona Norte del GBA. "
+    "Las sesiones se organizan por paquetes (10 o 20) o mensualmente, buscando la mejor relación costo-calidad. "
+    "La osteopatía se abona por sesión individual ($60.000 aprox.), mientras que la kinesiología ronda entre $25.000 y $30.000, "
+    "y la enfermería entre $10.000 y $20.000 según la prestación. "
+    "Si el usuario es paciente, destacá los beneficios de recibir atención en casa: comodidad, confianza y continuidad del tratamiento. "
+    "Si el usuario es profesional, explicá los requisitos: matrícula provincial y nacional, seguro de mala praxis, monotributo activo, etc. "
+    "Resaltá que REKAR ofrece honorarios competitivos, formación, soporte constante y asignación de pacientes por cercanía. "
+    "Si el usuario es una obra social o institución, mostralé seguridad y ofrecé soluciones: coordinación de prestaciones, control de insumos, informes y seguimiento clínico. "
+    "Las urgencias médicas no son parte de nuestro servicio: indicá siempre comunicarse con el 107, SAME o su cobertura médica. "
+    "Los cuidadores acompañan y asisten, pero no realizan prácticas médicas ni kinésicas. "
+    "Si alguien es irrespetuoso o usa malas palabras, respondé con calma y cortá la conversación educadamente. "
+    "Si no sabés algo, indicá que puede escribir a rekar.salud@gmail.com o elegir la opción 6 del menú para hablar con un representante. "
+    "Finalizá siempre tus respuestas recordando: ‘Si querés volver al menú principal, escribí M. Para salir, S.’"
+)
 
 faq = {
     "precio": (
         "💰 En REKAR organizamos los tratamientos por paquetes de sesiones (10 o 20), "
         "ya que creemos que la recuperación es un proceso continuo y no una sesión aislada. "
-        "Kinesiología cuesta entre $25.000 y $30.000 por sesión (con descuento por paquete), "
-        "osteopatía $60.000, y enfermería entre $10.000 y $20.000 según la prestación. "
+        "Kinesiología cuesta entre $25.000 y $30.000 por sesión (con descuento por paquete). "
+        "Osteopatía $60.000, y enfermería entre $10.000 y $20.000 según la prestación. "
         "Los pagos pueden realizarse por transferencia o plan mensual."
-        ),
+    ),
     "zona": (
-        "📍 Atendemos actualmente en Gran Buenos Aires — Zonas Sur, Oeste y Norte. "
-        "Siempre buscamos que el profesional esté cerca del domicilio del paciente, para garantizar continuidad y comodidad."
-        ),
+        "📍 Atendemos actualmente en Gran Buenos Aires – Zonas Sur, Oeste y Norte. "
+        "Siempre buscamos que el profesional esté cerca del domicilio del paciente, "
+        "para garantizar continuidad y comodidad."
+    ),
     "obras sociales": (
-        "🏥 No trabajamos con obras sociales directamente, pero sí realizamos servicios para obras sociales que nos contratan "
-        "y derivan pacientes a nuestra red de profesionales."
-        ),
-    "diferencia": (
-        "🌟 REKAR se diferencia por su enfoque humano y tecnológico. "
-        "Geolocalizamos pacientes y profesionales, capacitamos continuamente a nuestro equipo, "
-        "hacemos seguimiento de cada caso y registramos las evoluciones clínicas. "
-        "Además, desarrollamos una app con historia clínica digital, firma electrónica y control de insumos."
-        ),
-    "seguimiento": (
-        "📋 Cada atención queda registrada en planillas y evoluciones kinésicas y de enfermería. "
-        "En breve todos los registros estarán en formato digital, para mayor trazabilidad y transparencia. "
-        "Supervisamos los tratamientos y acompañamos tanto al paciente como al profesional."
-        ),
-    "evaluacion": (
-        "🧑‍⚕️ Sí, ofrecemos evaluaciones iniciales sin compromiso a través de Zoom. "
-        "Es una excelente oportunidad para conocernos y planificar juntos el mejor tratamiento."
-        ),
-    "profesionales": (
-        "👩‍⚕️ Buscamos kinesiólogos, enfermeros y cuidadores con vocación, compromiso y empatía. "
-        "En REKAR priorizamos las ganas de trabajar y crecer. "
-        "Brindamos capacitaciones y acompañamiento constante a nuestros profesionales."
-        ),
-    "habilitacion": (
-        "✅ Para trabajar con nosotros necesitás: matrícula provincial y nacional habilitante, "
-        "seguro de mala praxis vigente, CV actualizado, certificado de antecedentes penales y monotributo activo."
-        ),
-    "pacientes": (
-        "🩺 Atendemos pacientes con patologías respiratorias, motoras, neurológicas, deportivas, pediátricas, posquirúrgicas "
-        "y crónicas. También trabajamos en rehabilitación motora y cuidados paliativos."
-        ),
-    "urgencias": (
-        "🚨 En caso de urgencias médicas, comunicate con el 107 (SAME) o tu cobertura médica. "
-        "REKAR se dedica al seguimiento y recuperación funcional, no a emergencias. "
-        "Podés contactarnos ante cualquier duda o síntoma para recibir orientación."
-        ),
-    "cuidador": (
-        "👵 Los cuidadores acompañan, asisten en higiene, alimentación y control de alarmas, "
-        "pero no realizan intervenciones médicas ni kinésicas. Su rol es contener y avisar al equipo de salud ante cualquier cambio."
-        ),
-    "medicos": (
-        "👨‍⚕️ Contamos con médicos coordinadores que supervisan la evolución de los pacientes cada 15 días, "
-        "evaluando progresos y garantizando la calidad del tratamiento."
-        ),
-    "contacto": (
-        "📩 Para consultas, postulaciones o convenios, escribinos a rekar.salud@gmail.com "
-        "o elegí la opción 6 del menú para hablar con un representante humano."
-        )
-    }
+        "🏥 No trabajamos con obras sociales directamente, pero sí realizamos servicios "
+        "para obras sociales que nos contratan y derivan pacientes a nuestra red de profesionales."
+    )
+}
+
+    
         
         parts = []
         if context_hint:
